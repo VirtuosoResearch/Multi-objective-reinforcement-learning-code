@@ -1,0 +1,12 @@
+checkpoints/
+indices/
+__pycache__/
+*.pyc
+results/
+logs/
+dataset/
+data/
+subset_indices/
+
+*.egg-info/
+*.pdf
