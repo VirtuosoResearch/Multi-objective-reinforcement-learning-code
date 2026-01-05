@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taskHessian"
+version = "0.1.0"
+description = "Short description of your package"
+readme = ""
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{ name = "Your Name", email = "you@example.com" }]
+dependencies = [
+  # "numpy>=1.26",  # add runtime deps here
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["taskHessian*"]
