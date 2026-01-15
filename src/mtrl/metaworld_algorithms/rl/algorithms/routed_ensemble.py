@@ -57,9 +57,12 @@ class RoutedEnsembleConfig(AlgorithmConfig):
     score_eps: float = 1e-8
     update_mode: str = "single_policy"
     routing_cache_steps: int = 1
+    fixed_task_assignments: tuple[tuple[int, ...], ...] | None = None
 
 
 class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
+    # Ensemble of independent MTSAC experts with task-based routing and
+    # optional routing cache for multi-step reuse of assignments.
     experts: tuple[MTSAC, ...]
     centroids: jax.Array
     grad_ema: jax.Array
@@ -85,6 +88,7 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
     def initialize(
         config: RoutedEnsembleConfig, env_config: EnvConfig, seed: int = 1
     ) -> "RoutedEnsembleMTSAC":
+        # Build per-expert MTSAC configs and initialize expert parameters.
         base_config = MTSACConfig(
             num_tasks=config.num_tasks,
             gamma=config.gamma,
@@ -106,6 +110,7 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
         )
 
         centroid_key = jax.random.PRNGKey(seed)
+        # Initialize per-expert task preference centroids for routing.
         if config.centroid_init == "uniform":
             centroids = jnp.full(
                 (config.num_experts, config.num_tasks),
@@ -121,6 +126,44 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
         else:
             raise ValueError(f"Unknown centroid_init: {config.centroid_init}")
 
+        # For centroid_only, override with fixed per-expert task preferences.
+        if config.score_type == "centroid_only":
+            fixed_centroids = np.zeros(
+                (config.num_experts, config.num_tasks), dtype=np.float32
+            )
+            if config.fixed_task_assignments is None:
+                base = config.num_tasks // config.num_experts
+                remainder = config.num_tasks % config.num_experts
+                task_idx = 0
+                for expert_idx in range(config.num_experts):
+                    k_i = base + (1 if expert_idx < remainder else 0)
+                    if k_i == 0:
+                        continue
+                    assigned = np.arange(task_idx, task_idx + k_i)
+                    fixed_centroids[expert_idx, assigned] = 1.0 / k_i
+                    task_idx += k_i
+            else:
+                if len(config.fixed_task_assignments) != config.num_experts:
+                    raise ValueError(
+                        "fixed_task_assignments must have one list per expert."
+                    )
+                for expert_idx, task_ids in enumerate(
+                    config.fixed_task_assignments
+                ):
+                    if len(task_ids) == 0:
+                        continue
+                    task_ids_array = np.asarray(task_ids, dtype=np.int64)
+                    if np.any(task_ids_array < 0) or np.any(
+                        task_ids_array >= config.num_tasks
+                    ):
+                        raise ValueError(
+                            "fixed_task_assignments task id out of range."
+                        )
+                    k_i = int(task_ids_array.shape[0])
+                    fixed_centroids[expert_idx, task_ids_array] = 1.0 / k_i
+            centroids = jnp.asarray(fixed_centroids)
+
+        # Select routing score function; some modes reuse gradient similarity scoring.
         if config.score_type == "gradient_similarity":
             score_fn: ScoreFn = GradientSimilarityScore(eps=config.score_eps)
         elif config.score_type in {"reward_rank", "centroid_only", "random_fixed"}:
@@ -128,6 +171,7 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
         else:
             raise ValueError(f"Unknown score_type: {config.score_type}")
 
+        # Fixed task-to-expert assignment for the random_fixed routing mode.
         task_expert_map = rng.integers(
             0, config.num_experts, size=config.num_tasks, dtype=np.int64
         )
@@ -138,6 +182,7 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
         cached_sample_counts = np.zeros(config.num_experts, dtype=np.int64)
 
         flat_params, _ = flatten_util.ravel_pytree(experts[0].actor.params)
+        # Track per-expert EMA of policy gradients for similarity routing.
         grad_ema = jnp.zeros(
             (config.num_experts, flat_params.shape[0]), dtype=flat_params.dtype
         )
@@ -190,6 +235,7 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
     def _select_experts(
         self, task_ids: Float[npt.NDArray, "task num_tasks"]
     ) -> npt.NDArray[np.int64]:
+        # Route each task to an expert using fixed mapping or centroid proximity.
         if self.score_type == "random_fixed":
             task_indices = np.asarray(np.argmax(task_ids, axis=1))
             return self.task_expert_map[task_indices]
@@ -204,6 +250,7 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
         observations: jax.Array,
         actions: jax.Array,
     ) -> jax.Array:
+        # Flattened policy-gradient vector from negative log-likelihood loss.
         def loss_fn(params) -> jax.Array:
             dist = actor.apply_fn(params, observations)
             log_prob = dist.log_prob(actions)
@@ -218,6 +265,7 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
     def _compute_reward_score(
         self, expert: MTSAC, observations: jax.Array
     ) -> jax.Array:
+        # Score expert by expected minimum Q value under its greedy action.
         dist = expert.actor.apply_fn(expert.actor.params, observations)
         actions = dist.mode()
         q_values = expert.critic.apply_fn(expert.critic.params, observations, actions)
@@ -229,6 +277,7 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
         data: ReplayBufferSamples,
         task_ids: Float[Array, "batch num_tasks"],
     ) -> ReplayBufferSamples:
+        # Group batch data by task index; assumes task ids are one-hot.
         tasks = jnp.argmax(task_ids, axis=1)
         sorted_indices = jnp.argsort(tasks)
 
@@ -242,6 +291,7 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
 
     @override
     def sample_action(self, observation: Observation) -> tuple[Self, Action]:
+        # Sample actions from all experts, then select by routed expert per task.
         task_ids = observation[..., -self.num_tasks :]
         expert_indices = self._select_experts(task_ids)
 
@@ -258,6 +308,7 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
 
     @override
     def eval_action(self, observations: Observation) -> Action:
+        # Deterministic action selection routed by task-specific expert.
         task_ids = observations[..., -self.num_tasks :]
         expert_indices = self._select_experts(task_ids)
 
@@ -268,12 +319,14 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
 
     @override
     def update(self, data: ReplayBufferSamples) -> tuple[Self, LogDict]:
+        # Train experts either on shared data (single_policy) or routed data.
         experts = list(self.experts)
         centroids = self.centroids
         grad_ema = self.grad_ema
         logs_accum: dict[str, list[float]] = {}
 
         if self.update_mode == "single_policy":
+            # Update every expert on the same batch; no routing.
             for expert_idx, expert in enumerate(experts):
                 experts[expert_idx], expert_logs = expert.update(data)
                 for key, value in expert_logs.items():
@@ -299,12 +352,14 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
         if self.update_mode != "routed":
             raise ValueError(f"Unknown update_mode: {self.update_mode}")
 
+        # Optionally reuse cached routing assignments for multiple steps.
         use_cache = self.routing_cache_steps > 1 and self.routing_cache_remaining > 0
         assignment_counts = self.cached_assignment_counts
         sample_counts = self.cached_sample_counts
         expert_batches = list(self.cached_expert_batches)
 
         if not use_cache:
+            # Split batch by task and assign each task to the best expert.
             task_ids = data.observations[..., -self.num_tasks :]
             split_data = self._split_data_by_tasks(data, task_ids)
 
@@ -326,6 +381,7 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
                     expert_idx = int(self.task_expert_map[task_idx])
                     scores = None
                 elif self.score_type == "gradient_similarity":
+                    # Prefer experts whose gradient aligns with their EMA.
                     grad_vectors = []
                     scores = []
                     for expert_idx, expert in enumerate(experts):
@@ -336,16 +392,19 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
                         scores.append(self.score_fn(grad_vector, grad_ema[expert_idx]))
                     scores = jnp.stack(scores)
                 elif self.score_type == "reward_rank":
+                    # Prefer experts with higher expected min-Q on task data.
                     scores = jnp.stack(
                         [self._compute_reward_score(expert, obs) for expert in experts]
                     )
                 elif self.score_type == "centroid_only":
+                    # Ignore scores and route solely by centroid proximity.
                     scores = jnp.zeros((self.num_experts,), dtype=centroids.dtype)
                 else:
                     raise ValueError(f"Unknown score_type: {self.score_type}")
 
                 w_t = jax.nn.one_hot(task_idx, self.num_tasks)
                 if scores is not None:
+                    # Combine task-score with a centroid penalty to discourage drift.
                     centroid_penalty = -self.lambda_mu * jnp.sum(
                         (centroids - w_t) ** 2, axis=1
                     )
@@ -353,16 +412,19 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
                     expert_idx = int(jax.device_get(jnp.argmax(total_scores)))
                 assignments[task_idx] = expert_idx
 
-                centroids = centroids.at[expert_idx].set(
-                    (1 - self.centroid_eta) * centroids[expert_idx]
-                    + self.centroid_eta * w_t
-                )
+                # Update routed expert's centroid and gradient EMA.
+                if self.score_type != "centroid_only":
+                    centroids = centroids.at[expert_idx].set(
+                        (1 - self.centroid_eta) * centroids[expert_idx]
+                        + self.centroid_eta * w_t
+                    )
                 if grad_vectors is not None:
                     grad_ema = grad_ema.at[expert_idx].set(
                         (1 - self.grad_ema_beta) * grad_ema[expert_idx]
                         + self.grad_ema_beta * grad_vectors[expert_idx]
                     )
 
+            # Dispatch each sample to the expert assigned to its task.
             sample_task_ids = np.argmax(np.asarray(task_ids), axis=1)
             expert_batches = []
             sample_counts = np.zeros(self.num_experts, dtype=np.int64)
@@ -385,6 +447,7 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
 
             assignment_counts = np.bincount(assignments, minlength=self.num_experts)
             if self.routing_cache_steps > 1:
+                # Cache routing decisions to reuse for the next steps.
                 routing_cache_remaining = self.routing_cache_steps - 1
                 cached_expert_batches = tuple(expert_batches)
                 cached_assignment_counts = assignment_counts
@@ -395,11 +458,13 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
                 cached_assignment_counts = assignment_counts
                 cached_sample_counts = sample_counts
         else:
+            # Reuse cached routing decisions and expert-specific batches.
             routing_cache_remaining = self.routing_cache_remaining - 1
             cached_expert_batches = self.cached_expert_batches
             cached_assignment_counts = self.cached_assignment_counts
             cached_sample_counts = self.cached_sample_counts
 
+        # Update each expert on its routed sub-batch and weight logs by samples.
         logs_weighted: dict[str, float] = {}
         total_weight = 0
         for expert_idx, expert in enumerate(experts):

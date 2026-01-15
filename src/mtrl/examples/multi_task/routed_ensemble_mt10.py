@@ -30,6 +30,11 @@ def main() -> None:
 
     num_tasks = 10
     num_experts = 3
+    expert_task_ids = [
+        [1, 2, 4, 5, 7],
+        [3, 6],
+        [0, 8, 9],
+    ]
 
     run = Run(
         run_name="mt10_routed_ensemble",
@@ -60,9 +65,11 @@ def main() -> None:
             lambda_mu=0.1,
             centroid_eta=0.1,
             grad_ema_beta=0.1,
-            score_type="reward_rank",
-            #score_type="centroid_only",
+            #score_type="gradient_similarity",
+            score_type="centroid_only",
             #update_mode="single_policy",
+            update_mode="routed",
+            fixed_task_assignments=tuple(tuple(ids) for ids in expert_task_ids),
         ),
         training_config=OffPolicyTrainingConfig(
             total_steps=int(2e7),
