@@ -470,12 +470,22 @@ if __name__ == '__main__':
 
     # save regrets to json
     import json
+    data = {}
+    data["S"] = S
+    data["A"] = A
+    data["H"] = H
+    data["d"] = d
+    data["K"] = K
+    data["num_tasks"] = num_tasks
+    data["num_experts"] = num_experts
+    data["conflict"] = conflict
+    data["regrets_ucbvi"] = regrets_ucbvi
+    data["regrets_ens"] = regrets_ens
+    data["regrets_uniform"] = regrets_uniform
+    data["regrets_random"] = regrets_random
+    data["regrets_stay"] = regrets_stay
     with open("regrets.json", "w") as f:
-        json.dump(regrets_ucbvi, f)
-        json.dump(regrets_ens, f)
-        json.dump(regrets_uniform, f)
-        json.dump(regrets_random, f)
-        json.dump(regrets_stay, f)
+        json.dump(data, f)
 
     plt.plot(range(K + 1), regrets_ucbvi, "-r")
     plt.plot(range(K + 1), regrets_ens, "--g")
