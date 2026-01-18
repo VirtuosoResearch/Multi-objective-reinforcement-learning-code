@@ -1,5 +1,7 @@
 import random
 import numpy as np
+import matplotlib.pyplot as plt
+
 
 class MOMDP(object):
     def __init__(self, S, A, H, d):
@@ -168,7 +170,6 @@ if __name__ == '__main__':
 
     momdp = MOMDP(S, A, H, d)
     moucbvi = MOUCBVI(momdp)
-
     
     Rs, Pis = moucbvi.online_game(K, coeff=0.1)
     regrets = momdp.regret(Rs, Pis)
@@ -176,10 +177,6 @@ if __name__ == '__main__':
 
     print(regrets[-10:])
     print(regrets_stay[-10:])
-
-
-    import numpy as np
-    import matplotlib.pyplot as plt
 
     plt.plot(range(K+1), regrets, "-r")
     plt.plot(range(K+1), regrets_stay, "--b")
