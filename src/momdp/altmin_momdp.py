@@ -1,14 +1,15 @@
 import numpy as np
+import matplotlib.pyplot as plt
 from mdp import MOMDP
 from mdp import MOUCBVI
 
-def scalarize_rewards(rewards, pref):
+def routing_optimization(rewards, pref):
     pref = np.asarray(pref, dtype=float)
     pref = pref / np.sum(pref)
     return np.sum(rewards * pref.reshape((-1, 1, 1, 1)), axis=0)
 
 
-def project_simplex(v):
+def policy_optimization(v):
     v = np.asarray(v, dtype=float)
     if np.sum(v) == 1.0 and np.all(v >= 0.0):
         return v
@@ -23,7 +24,7 @@ def project_simplex(v):
     return w
 
 
-class AltMinPreferenceLearner(object):
+class AltMinMOMDP(object):
     def __init__(
         self,
         momdp,
@@ -34,7 +35,7 @@ class AltMinPreferenceLearner(object):
         ridge=1e-4,
         seed=None,
     ):
-        super(AltMinPreferenceLearner, self).__init__()
+        super(AltMinMOMDP, self).__init__()
         self.momdp = momdp
         self.S = momdp.S
         self.A = momdp.A
@@ -100,7 +101,7 @@ if __name__ == "__main__":
     iters = 200
 
     momdp = MOMDP(S, A, H, d)
-    learner = AltMinPreferenceLearner(momdp, episodes_per_iter=3, coeff=0.1, seed=7)
+    learner = AltMinMOMDP(momdp, episodes_per_iter=3, coeff=0.1, seed=7)
 
     regrets = []
     pref_errors = []
@@ -113,10 +114,8 @@ if __name__ == "__main__":
     print("final pref true:", learner.pref_true)
     print("avg regret:", float(np.mean(regrets[-10:])))
 
-    import matplotlib.pyplot as plt
-
     plt.plot(range(iters), regrets, "-r")
     plt.plot(range(iters), pref_errors, "--b")
     plt.xlabel("iteration", fontsize=13)
     plt.legend(["regret", "pref error"], fontsize=11)
-    plt.savefig("altmin_mdp.pdf")
+    plt.savefig("plot/altmin_momdp.pdf")
