@@ -19,11 +19,26 @@ def softmax(scores, temperature=1.0):
     exps = np.exp(scaled)
     return exps / np.sum(exps)
 
+def project_simplex(v):
+    v = np.asarray(v, dtype=float)
+    if np.sum(v) == 1.0 and np.all(v >= 0.0):
+        return v
+    u = np.sort(v)[::-1]
+    cssv = np.cumsum(u)
+    rho = np.nonzero(u * np.arange(1, len(u) + 1) > (cssv - 1.0))[0]
+    if rho.size == 0:
+        return np.ones_like(v) / max(len(v), 1)
+    rho = rho[-1]
+    theta = (cssv[rho] - 1.0) / float(rho + 1)
+    w = np.maximum(v - theta, 0.0)
+    return w
+
 
 class ConflictMOMDP(MOMDP):
-    def __init__(self, S, A, H, d, conflict=0.0, noise_scale=0.05, seed=None):
+    def __init__(self, S, A, H, d, conflict=0.0, noise_scale=0.05, num_conflicting=None, seed=None):
         self.conflict = conflict
         self.noise_scale = noise_scale
+        self.num_conflicting = num_conflicting
         set_seed(seed)
         super(ConflictMOMDP, self).__init__(S, A, H, d)
 
@@ -33,8 +48,11 @@ class ConflictMOMDP(MOMDP):
             anti = 1.0 - base
             rewards = np.zeros((self.d, self.H, self.S, self.A))
             order = np.random.permutation(self.d)
+            num_conflicting = self.d // 2 if self.num_conflicting is None else int(self.num_conflicting)
+            num_conflicting = max(0, min(num_conflicting, self.d))
+            num_aligned = self.d - num_conflicting
             for idx, j in enumerate(order):
-                if idx < self.d // 2:
+                if idx < num_aligned:
                     target = base
                 else:
                     target = (1.0 - self.conflict) * base + self.conflict * anti
@@ -232,6 +250,7 @@ class RoutedEnsembleUCBVI(object):
         share_histogram=False,
         coeff_scales=None,
         select_by_value=True,
+        policy_mode="select",
         routing_mode="score",
         random_alpha=1.0,
         init_centroids="dirichlet",
@@ -252,6 +271,9 @@ class RoutedEnsembleUCBVI(object):
         self.min_resp = min_resp
         self.share_histogram = share_histogram
         self.select_by_value = select_by_value
+        if policy_mode not in ("select", "weighted"):
+            raise ValueError("Unknown policy_mode: {}".format(policy_mode))
+        self.policy_mode = policy_mode
         self.routing_mode = routing_mode
         self.random_alpha = random_alpha
         self.update_self_only = update_self_only
@@ -275,11 +297,37 @@ class RoutedEnsembleUCBVI(object):
             shared_histogram = np.ones((self.S, self.A, self.S))
         self.experts = [UCBVIExpert(momdp, histogram=shared_histogram) for _ in range(self.K)]
 
+    def _mix_policies(self, policies, weights):
+        weights = np.asarray(weights, dtype=float)
+        weight_sum = np.sum(weights)
+        if weight_sum <= 0.0:
+            weights = np.ones(self.K) / self.K
+        else:
+            weights = weights / weight_sum
+        pi_ens = np.zeros((self.H, self.S, self.A))
+        for k in range(self.K):
+            pi_ens += weights[k] * policies[k]
+        return pi_ens
+
     def _score_trajectory(self, Q, trajectory):
         score = 0.0
         for h, (x, a, _) in enumerate(trajectory):
             score += Q[h, x, a]
         return score
+
+    def _estimate_pref_lstsq(self, reward, trajectories):
+        rows = []
+        targets = []
+        for traj in trajectories:
+            for h, (x, a, _) in enumerate(traj):
+                rows.append(self.momdp.rewards[:, h, x, a])
+                targets.append(reward[h, x, a])
+        if not targets:
+            return np.ones(self.d) / self.d
+        Q = np.stack(rows, axis=0)
+        r = np.asarray(targets, dtype=float)
+        w, _, _, _ = np.linalg.lstsq(Q, r, rcond=None)
+        return project_simplex(w)
 
     def online_game(self, rewards, prefs, coeff=1.0, task_ids=None):
         Rs = []
@@ -302,7 +350,7 @@ class RoutedEnsembleUCBVI(object):
                 values.append(expert.eval_policy_value(reward, policy))
 
             if self.update_self_only:
-                resp = self._get_routing_resp(pref, Qs, trajectories)
+                resp = self._get_routing_resp(pref, Qs, trajectories, reward=reward)
                 weight_scale = self.K if self.self_update_scale is None else self.self_update_scale
                 for k in range(self.K):
                     self.experts[k].update_history(trajectories[k], weight=resp[k] * weight_scale)
@@ -310,7 +358,7 @@ class RoutedEnsembleUCBVI(object):
             else:
                 total_resp = np.zeros(self.K)
                 for trajectory in trajectories:
-                    resp = self._get_routing_resp(pref, Qs, trajectories, trajectory)
+                    resp = self._get_routing_resp(pref, Qs, trajectories, trajectory, reward=reward)
                     for k in range(self.K):
                         self.experts[k].update_history(trajectory, weight=resp[k])
                     total_resp += resp
@@ -320,15 +368,21 @@ class RoutedEnsembleUCBVI(object):
                     step = self.eta * avg_resp[k]
                     self.centroids[k] = (1.0 - step) * self.centroids[k] + step * pref
 
+            if self.policy_mode == "weighted":
+                Pis.append(self._mix_policies(policies, avg_resp))
+                Rs.append(reward)
+                continue
             if self.select_by_value:
                 k_select = np.argmax(values)
+            elif self.routing_mode == "lstsq_bayes":
+                k_select = int(np.argmax(avg_resp))
             else:
                 k_select = np.argmin(np.sum((self.centroids - pref) ** 2, axis=1))
             Pis.append(policies[k_select])
             Rs.append(reward)
         return Rs, Pis
 
-    def _get_routing_resp(self, pref, Qs, trajectories, trajectory=None):
+    def _get_routing_resp(self, pref, Qs, trajectories, trajectory=None, reward=None):
         if self.routing_mode == "score":
             if trajectory is None:
                 scores = np.array([self._score_trajectory(Qs[k], trajectories[k]) for k in range(self.K)])
@@ -343,6 +397,19 @@ class RoutedEnsembleUCBVI(object):
             scores = np.zeros(self.K)
             for k in range(self.K):
                 diff = pref - self.centroids[k]
+                scores[k] = -max(self.lambda_mu, 1e-6) * np.dot(diff, diff)
+            resp = softmax(scores, temperature=self.route_temperature)
+        elif self.routing_mode == "lstsq_bayes":
+            if reward is None:
+                raise ValueError("reward is required for routing_mode: lstsq_bayes")
+            if trajectory is None:
+                trajs = trajectories
+            else:
+                trajs = [trajectory]
+            w_est = self._estimate_pref_lstsq(reward, trajs)
+            scores = np.zeros(self.K)
+            for k in range(self.K):
+                diff = w_est - self.centroids[k]
                 scores[k] = -max(self.lambda_mu, 1e-6) * np.dot(diff, diff)
             resp = softmax(scores, temperature=self.route_temperature)
         elif self.routing_mode == "uniform":
@@ -379,6 +446,7 @@ if __name__ == '__main__':
         d,
         conflict=conflict,
         noise_scale=0.05,
+        num_conflicting=num_tasks,
         seed=seed,
     )
     rewards, prefs = build_reward_sequence(
@@ -419,6 +487,26 @@ if __name__ == '__main__':
         set_seed(algo_seed)
     rewards_ens, policies_ens = ensemble.online_game(rewards, prefs, coeff=0.1, task_ids=task_ids)
 
+    weighted_ensemble = RoutedEnsembleUCBVI(
+        momdp,
+        num_experts,
+        eta=0.3,
+        lambda_mu=1.0,
+        route_temperature=0.6,
+        min_resp=0.02,
+        share_histogram=True,
+        coeff_scales=coeff_scales,
+        select_by_value=True,
+        policy_mode="weighted",
+        routing_mode="score",
+        init_centroids="dirichlet",
+        update_self_only=False,
+        seed=seed + 5,
+    )
+    rewards_weighted, policies_weighted = weighted_ensemble.online_game(
+        rewards, prefs, coeff=0.1, task_ids=task_ids
+    )
+
     uniform_ensemble = RoutedEnsembleUCBVI(
         momdp,
         num_experts,
@@ -453,8 +541,26 @@ if __name__ == '__main__':
     rewards_random, policies_random = random_ensemble.online_game(rewards, prefs, coeff=0.1, task_ids=task_ids)
     regrets_random = regret_with_transits(rewards_random, policies_random, transits)
 
+    lstsq_bayes_ensemble = RoutedEnsembleUCBVI(
+        momdp,
+        num_experts,
+        eta=0.3,
+        lambda_mu=1.0,
+        route_temperature=0.6,
+        min_resp=0.02,
+        share_histogram=True,
+        select_by_value=False,
+        routing_mode="lstsq_bayes",
+        init_centroids="dirichlet",
+        update_self_only=False,
+        seed=seed + 6,
+    )
+    rewards_lstsq_bayes, policies_lstsq_bayes = lstsq_bayes_ensemble.online_game(rewards, prefs, coeff=0.1, task_ids=task_ids)
+    regrets_lstsq_bayes = regret_with_transits(rewards_lstsq_bayes, policies_lstsq_bayes, transits)
+
     regrets_ucbvi = regret_with_transits(rewards, policies_ucbvi, transits)
     regrets_ens = regret_with_transits(rewards_ens, policies_ens, transits)
+    regrets_weighted = regret_with_transits(rewards_weighted, policies_weighted, transits)
     regrets_uniform = regret_with_transits(rewards_uniform, policies_uniform, transits)
     regrets_random = regret_with_transits(rewards_random, policies_random, transits)
     avg_reward = np.mean(np.stack(rewards, axis=0), axis=0)
@@ -464,6 +570,7 @@ if __name__ == '__main__':
 
     print(regrets_ucbvi[-10:])
     print(regrets_ens[-10:])
+    print(regrets_weighted[-10:])
     print(regrets_uniform[-10:])
     print(regrets_random[-10:])
     print(regrets_stay[-10:])
@@ -481,28 +588,24 @@ if __name__ == '__main__':
     data["conflict"] = conflict
     data["regrets_ucbvi"] = regrets_ucbvi
     data["regrets_ens"] = regrets_ens
+    data["regrets_weighted"] = regrets_weighted
     data["regrets_uniform"] = regrets_uniform
     data["regrets_random"] = regrets_random
+    data["regrets_lstsq_bayes"] = regrets_lstsq_bayes
     data["regrets_stay"] = regrets_stay
     with open("regrets.json", "w") as f:
         json.dump(data, f)
 
-    plt.plot(range(K + 1), regrets_ucbvi, "-r")
-    plt.plot(range(K + 1), regrets_ens, "--g")
-    plt.plot(range(K + 1), regrets_uniform, "--y")
-    plt.plot(range(K + 1), regrets_random, "--m")
-    plt.plot(range(K + 1), regrets_stay, "--b")
+    plt.plot(range(K + 1), regrets_ucbvi, "-r", label="MO-UCBVI")
+    plt.plot(range(K + 1), regrets_ens, "--g", label="Routed Ensemble")
+    plt.plot(range(K + 1), regrets_weighted, "--c", label="Weighted Ensemble")
+    plt.plot(range(K + 1), regrets_uniform, "--y", label="Uniform Ensemble")
+    plt.plot(range(K + 1), regrets_random, "--m", label="Random Ensemble")
+    plt.plot(range(K + 1), regrets_lstsq_bayes, "--k", label="LSTSQ Bayes Ensemble")
+    plt.plot(range(K + 1), regrets_stay, "--b", label="Best stationary policy")
 
     plt.xlabel("number of episodes", fontsize=15)
     plt.ylabel("total regret", fontsize=15)
-    ensemble_label = "Warmup Preference Ensemble" if use_warmup_preference_ensemble else "Routed Ensemble"
-    plt.legend(
-        [
-            "MO-UCBVI",
-            ensemble_label,
-            "Best stationary policy",
-        ],
-        fontsize=11,
-    )
+    plt.legend(fontsize=11)
 
     plt.savefig("ensemble_mdp.pdf")
