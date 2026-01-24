@@ -1,9 +1,24 @@
 import inspect
 from types import SimpleNamespace
+import xml.etree.ElementTree as ET
 
 import numpy as np
 from gym import spaces
 from gym.envs.mujoco import mujoco_env
+
+
+def _infer_timestep(model_path):
+    try:
+        root = ET.parse(model_path).getroot()
+        option = root.find("option")
+        if option is None:
+            return None
+        timestep = option.attrib.get("timestep")
+        if timestep is None:
+            return None
+        return float(timestep)
+    except Exception:
+        return None
 
 
 def init_mujoco_env(env, model_path, frame_skip):
@@ -13,7 +28,10 @@ def init_mujoco_env(env, model_path, frame_skip):
         env.metadata = {}
     if env.metadata.get("render_modes") != expected_render_modes:
         env.metadata["render_modes"] = expected_render_modes
-    env.metadata.setdefault("render_fps", 20)
+    timestep = _infer_timestep(model_path)
+    if timestep is None:
+        timestep = 0.01
+    env.metadata["render_fps"] = int(np.round(1.0 / (timestep * frame_skip)))
 
     def ensure_sim():
         if hasattr(env, "sim"):
