@@ -9,7 +9,6 @@ os.environ ['OPENBLAS_NUM_THREADS'] = str(cpu_num)
 os.environ ['MKL_NUM_THREADS'] = str(cpu_num)
 os.environ ['VECLIB_MAXIMUM_THREADS'] = str(cpu_num)
 os.environ ['NUMEXPR_NUM_THREADS'] = str(cpu_num)
-os.environ["WANDB_API_KEY"] = "b26af16f098a021f99a7de6c84df44c8a5728033"
 #os.environ["WANDB_MODE"] = "offline"
 torch.set_num_threads(cpu_num)
 import argparse
@@ -152,7 +151,11 @@ def run():
     log_dir = os.path.join(
         'logs', args.env_id,
         f'MOSAC_with_Ep_recorder-set{args.prefer}-buf{args.buf_num}-seed{args.seed}_freq{args.q_freq}')
-    our_wandb = wandb.init(project="COLA",name=name)
+    our_wandb = wandb.init(
+        project="morl",
+        entity="zszhang-northeastern-university",
+        name=name,
+    )
     agent = SacAgent(env_id=args.env_id, env=env, log_dir=log_dir, **configs)
     agent.run(our_wandb)
 
