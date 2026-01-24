@@ -5,6 +5,7 @@
 import numpy as np
 from gym import utils
 from gym.envs.mujoco import mujoco_env
+from . import mujoco_compat
 from os import path
 
 class HalfCheetahEnv(mujoco_env.MujocoEnv, utils.EzPickle):
@@ -14,7 +15,7 @@ class HalfCheetahEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         self.max_episode_steps = 500
         self._max_episode_steps = 500
         self.steps = 0
-        mujoco_env.MujocoEnv.__init__(self, model_path = path.join(path.abspath(path.dirname(__file__)), "assets/half_cheetah.xml"), frame_skip = 5)
+        mujoco_compat.init_mujoco_env(self, model_path = path.join(path.abspath(path.dirname(__file__)), "assets/half_cheetah.xml"), frame_skip = 5)
         utils.EzPickle.__init__(self)
 
 
@@ -34,7 +35,7 @@ class HalfCheetahEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         done = not (abs(ang) < np.deg2rad(50))
         # if self.steps > self._max_episode_steps:
         #     done = True
-        return ob, np.array([reward_run, reward_energy]), done, {'obj': np.array([reward_run, reward_energy])}
+        return ob, np.array([reward_run, reward_energy]), done, False, {'obj': np.array([reward_run, reward_energy])}
     
     def _get_obs(self):
         return np.concatenate([

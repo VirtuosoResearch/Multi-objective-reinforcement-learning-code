@@ -10,7 +10,7 @@ from base import QMemory
 
 from model import TwinnedQNetwork, GaussianPolicy, Latent_Encoder
 from utils import grad_false, hard_update, soft_update, to_batch,\
-    update_params, RunningMeanStats
+    update_params, RunningMeanStats, reset_env, step_env
 import random
 from multi_step import *
 from datetime import datetime
@@ -328,7 +328,13 @@ class SacAgent:
             torch.cuda.manual_seed(seed)
             torch.cuda.manual_seed_all(seed)
         np.random.seed(seed)
-        self.env.seed(seed)
+        if hasattr(self.env, "seed") and callable(getattr(self.env, "seed")):
+            self.env.seed(seed)
+        else:
+            try:
+                self.env.reset(seed=seed)
+            except TypeError:
+                pass
         self.env.action_space.seed(seed)
         random.seed(seed)
         torch.backends.cudnn.deterministic = True  # It harms a performance.
@@ -564,7 +570,7 @@ class SacAgent:
     def evluate(self, preference, policy, RL_agent=False):
 
         episode_steps = 0
-        state = self.env.reset()
+        state = reset_env(self.env)
         done = False
         episode_reward = 0.
         # Sample preference from prefernence space
@@ -572,7 +578,7 @@ class SacAgent:
             ## Just fixed
             if self.start_steps > self.steps:
                 action = self.env.action_space.sample()
-                next_state, reward, done, _ = self.env.step(action)
+                next_state, reward, done, _ = step_env(self.env, action)
             else:
                 tp_state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
                 tp_preference = torch.FloatTensor(preference).unsqueeze(0).to(self.device)
@@ -601,7 +607,7 @@ class SacAgent:
                 action =action.cpu().numpy().reshape(-1)
 
                 # action = self.act(state)
-                next_state, reward, done, _ = self.env.step(action * self.max_action)
+                next_state, reward, done, _ = step_env(self.env, action * self.max_action)
             self.steps += 1
             episode_steps += 1
             episode_reward += reward
@@ -1154,12 +1160,12 @@ class SacAgent:
             # Evaluate agent for the preferences in w_batch
             for p_index, evalPreference in enumerate(Preference_for_HV):
                 eval_Pre = evalPreference
-                state = self.env.reset()
+                state = reset_env(self.env)
                 terminal = False
                 tot_rewards = 0
                 while not terminal:
                     action = self.exploit(state, evalPreference)
-                    next_state, reward, terminal, _ = self.env.step(action*self.max_action)
+                    next_state, reward, terminal, _ = step_env(self.env, action * self.max_action)
                     tot_rewards += reward
                     state = next_state
                 recovered_objs[p_index] +=tot_rewards

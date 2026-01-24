@@ -17,6 +17,7 @@ from datetime import datetime
 import gym
 import numpy as np
 import random
+import inspect
 
 from environments import *
 
@@ -142,7 +143,10 @@ def run():
         'consider_other': args.consider_other
     }
 
-    env = gym.make(args.env_id)
+    make_kwargs = {}
+    if "disable_env_checker" in inspect.signature(gym.make).parameters:
+        make_kwargs["disable_env_checker"] = True
+    env = gym.make(args.env_id, **make_kwargs)
     configs['ref_point'] = [0.0,0.0]
 
     log_dir = os.path.join(

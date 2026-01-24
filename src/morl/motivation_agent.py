@@ -10,7 +10,7 @@ from base import QMemory
 
 from model import TwinnedQNetwork, GaussianPolicy, Latent_Encoder
 from utils import grad_false, hard_update, soft_update, to_batch,\
-    update_params, RunningMeanStats
+    update_params, RunningMeanStats, reset_env, step_env
 import random
 from multi_step import *
 from datetime import datetime
@@ -560,7 +560,7 @@ class SacAgent:
     def evluate(self, preference, policy, RL_agent=False):
 
         episode_steps = 0
-        state = self.env.reset()
+        state = reset_env(self.env)
         done = False
         episode_reward = 0.
 
@@ -594,7 +594,7 @@ class SacAgent:
             action =action.cpu().numpy().reshape(-1)
 
             # action = self.act(state)
-            next_state, reward, done, _ = self.env.step(action * self.max_action)
+            next_state, reward, done, _ = step_env(self.env, action * self.max_action)
             self.steps += 1
             episode_steps += 1
             episode_reward += reward
@@ -1324,14 +1324,14 @@ class SacAgent:
                 # evalPreference = FloatTensor(evalPreference)
                 # reset the environment
                 eval_Pre = evalPreference
-                state = self.env.reset()
+                state = reset_env(self.env)
                 terminal = False
                 tot_rewards = 0
                 cnt = 0
                 one_ep_u_reward = 0
                 while not terminal:
                     action = self.exploit(state, evalPreference)
-                    next_state, reward, terminal, _ = self.env.step(action*self.max_action)
+                    next_state, reward, terminal, _ = step_env(self.env, action * self.max_action)
                     tot_rewards += reward
                     state = next_state
                     cnt += 1
@@ -1377,12 +1377,12 @@ class SacAgent:
                 # reset the environment
 
                 eval_Pre = evalPreference
-                state = self.env.reset()
+                state = reset_env(self.env)
                 terminal = False
                 tot_rewards = 0
                 while not terminal:
                     action = self.exploit(state, evalPreference)
-                    next_state, reward, terminal, _ = self.env.step(action*self.max_action)
+                    next_state, reward, terminal, _ = step_env(self.env, action * self.max_action)
                     tot_rewards += reward
                     state = next_state
                 #    one_ep_u_reward += np.dot(reward , eval_Pre)

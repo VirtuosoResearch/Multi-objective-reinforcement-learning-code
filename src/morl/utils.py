@@ -3,6 +3,21 @@ import numpy as np
 import torch
 
 
+def reset_env(env, **kwargs):
+    result = env.reset(**kwargs)
+    if isinstance(result, tuple):
+        return result[0]
+    return result
+
+
+def step_env(env, action):
+    result = env.step(action)
+    if isinstance(result, tuple) and len(result) == 5:
+        obs, reward, terminated, truncated, info = result
+        return obs, reward, terminated or truncated, info
+    return result
+
+
 def to_batch(state, action, reward, next_state, done, device):
     state = torch.FloatTensor(state).unsqueeze(0).to(device)
     preference = torch.FloatTensor(state).unsqueeze(0).to(device)

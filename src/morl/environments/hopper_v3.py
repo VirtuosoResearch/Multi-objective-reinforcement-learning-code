@@ -5,6 +5,7 @@
 import numpy as np
 from gym import utils
 from gym.envs.mujoco import mujoco_env
+from . import mujoco_compat
 from os import path
 
 class HopperEnv(mujoco_env.MujocoEnv, utils.EzPickle):
@@ -14,7 +15,7 @@ class HopperEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         self.max_episode_steps = 500
         self._max_episode_steps = 500
         self.steps = 0
-        mujoco_env.MujocoEnv.__init__(self, model_path = path.join(path.abspath(path.dirname(__file__)), "assets/hopper.xml"), frame_skip = 5)
+        mujoco_compat.init_mujoco_env(self, model_path = path.join(path.abspath(path.dirname(__file__)), "assets/hopper.xml"), frame_skip = 5)
         utils.EzPickle.__init__(self)
 
 
@@ -33,7 +34,7 @@ class HopperEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         # if self.steps > self._max_episode_steps:
         #     done = True
         ob = self._get_obs()
-        return ob, np.array([reward_run, reward_jump, reward_energy]), done, {'obj': np.array([reward_run, reward_jump, reward_energy])}
+        return ob, np.array([reward_run, reward_jump, reward_energy]), done, False, {'obj': np.array([reward_run, reward_jump, reward_energy])}
 
     def _get_obs(self):
         return np.concatenate([

@@ -7,6 +7,7 @@ import numpy as np
 import half_cheetah_v3
 import hopper_v3
 import ant_v3
+from utils import reset_env, step_env
 
 import math
 import os
@@ -44,7 +45,13 @@ def exploit(state, preference):
 
 env_name = "MO_hopper-v0"
 env = gym.make(env_name)
-env.seed(0)
+if hasattr(env, "seed") and callable(getattr(env, "seed")):
+    env.seed(0)
+else:
+    try:
+        env.reset(seed=0)
+    except TypeError:
+        pass
 
 policy = GaussianPolicy(env.observation_space.shape[0] + env.reward_num ,env.action_space.shape[0],[256,256])
 
@@ -57,7 +64,7 @@ for i in range(5):
     date = f"MOSAC-set4-buf4-seed{i}"
     policy.load(f'./logs/{env_name}/{date}/model/policy_15.0.pth')
 
-    state=env.reset()
+    state = reset_env(env)
     env.continuous = True
     step = 0
 
@@ -71,7 +78,7 @@ for i in range(5):
         preference = torch.tensor( p,dtype=torch.float32  )
         sta.append(list(state))
         action = exploit(state, preference)
-        next_state, reward, done, _ = env.step(action)
+        next_state, reward, done, _ = step_env(env, action)
         act.append(list(action))
         #env.render()
         #episode_reward += reward*math.pow(gamma, step)
@@ -80,7 +87,7 @@ for i in range(5):
         step += 1
         if done:
             done=False
-            state=env.reset()
+            state = reset_env(env)
             print('')
             print('reward', p)
             tot[epi] = episode_reward

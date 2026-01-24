@@ -1,5 +1,6 @@
 import numpy as np
 from gym.envs.mujoco import mujoco_env
+from . import mujoco_compat
 from gym import utils
 from os import path
 
@@ -16,7 +17,7 @@ class HumanoidEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         self._max_episode_steps = 1000
         self.steps = 0
 
-        mujoco_env.MujocoEnv.__init__(self, model_path = path.join(path.abspath(path.dirname(__file__)), "assets/humanoid.xml"), frame_skip = 5)
+        mujoco_compat.init_mujoco_env(self, model_path = path.join(path.abspath(path.dirname(__file__)), "assets/humanoid.xml"), frame_skip = 5)
         utils.EzPickle.__init__(self)
 
     def _get_obs(self):
@@ -49,7 +50,7 @@ class HumanoidEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         done = bool((qpos[2] < 1.0) or (qpos[2] > 2.0))
         # if self.steps > self._max_episode_steps:
         #     done = True
-        return ob,  np.array([reward_energy_0, reward_energy_1, reward_energy_2, reward_energy_3 , reward_energy_4]), done, {'obj': np.array([reward_energy_0, reward_energy_1, reward_energy_2, reward_energy_3 , reward_energy_4]), 'speed': reward_run }
+        return ob,  np.array([reward_energy_0, reward_energy_1, reward_energy_2, reward_energy_3 , reward_energy_4]), done, False, {'obj': np.array([reward_energy_0, reward_energy_1, reward_energy_2, reward_energy_3 , reward_energy_4]), 'speed': reward_run }
 
     def reset_model(self):
         self.steps = 0

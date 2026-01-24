@@ -5,6 +5,7 @@
 import numpy as np
 from gym import utils
 from gym.envs.mujoco import mujoco_env
+from . import mujoco_compat
 from os import path
 
 class Walker2dEnv(mujoco_env.MujocoEnv, utils.EzPickle):
@@ -15,7 +16,7 @@ class Walker2dEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         self._max_episode_steps = 500
         self.steps = 0
         utils.EzPickle.__init__(self)
-        mujoco_env.MujocoEnv.__init__(self, model_path = path.join(path.abspath(path.dirname(__file__)), "assets/walker2d.xml"), frame_skip = 4)
+        mujoco_compat.init_mujoco_env(self, model_path = path.join(path.abspath(path.dirname(__file__)), "assets/walker2d.xml"), frame_skip = 4)
 
 
     def step(self, a):
@@ -34,7 +35,7 @@ class Walker2dEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         ob = self._get_obs()
         # if self.steps > self._max_episode_steps:
         #     done = True
-        return ob,  np.array([reward_speed, reward_energy]), done, {'obj': np.array([reward_speed, reward_energy])}
+        return ob,  np.array([reward_speed, reward_energy]), done, False, {'obj': np.array([reward_speed, reward_energy])}
 
     def _get_obs(self):
         qpos = self.sim.data.qpos
