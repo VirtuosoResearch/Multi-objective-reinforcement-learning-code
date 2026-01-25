@@ -19,6 +19,15 @@ def softmax(scores, temperature=1.0):
     exps = np.exp(scaled)
     return exps / np.sum(exps)
 
+
+def argmax(scores):
+    scores = np.asarray(scores, dtype=float)
+    out = np.zeros_like(scores, dtype=float)
+    if scores.size:
+        out[np.argmax(scores)] = 1.0
+    return out
+
+
 def project_simplex(v):
     v = np.asarray(v, dtype=float)
     if np.sum(v) == 1.0 and np.all(v >= 0.0):
@@ -392,7 +401,8 @@ class RoutedEnsembleUCBVI(object):
                 for k in range(self.K):
                     diff = pref - self.centroids[k]
                     scores[k] -= self.lambda_mu * np.dot(diff, diff)
-            resp = softmax(scores, temperature=self.route_temperature)
+            # resp = softmax(scores, temperature=self.route_temperature)
+            resp = argmax(scores)
         elif self.routing_mode == "pref":
             scores = np.zeros(self.K)
             for k in range(self.K):
@@ -596,6 +606,7 @@ if __name__ == '__main__':
     with open("regrets.json", "w") as f:
         json.dump(data, f)
 
+    print('routed ensemble', regrets_ens)
     plt.plot(range(K + 1), regrets_ucbvi, "-r", label="MO-UCBVI")
     plt.plot(range(K + 1), regrets_ens, "--g", label="Routed Ensemble")
     plt.plot(range(K + 1), regrets_weighted, "--c", label="Weighted Ensemble")
