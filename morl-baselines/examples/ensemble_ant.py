@@ -98,7 +98,7 @@ def main():
 
     eval_env = make_env()
     ensemble.train(
-        total_timesteps=int(1e6),
+        total_timesteps=int(5e5),
         eval_env=eval_env,
         eval_freq=10_000,
         num_eval_episodes=3,

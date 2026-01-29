@@ -14,7 +14,7 @@ def make_env():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ensemble-size", type=int, default=4, help="Number of ensemble members.")
+    parser.add_argument("--ensemble-size", type=int, default=3, help="Number of ensemble members.")
     parser.add_argument("--pretrain-steps", type=int, default=0, help="Steps to pretrain each member before ensembling.")
     parser.add_argument("--weights-dir", type=str, default="pretrained_agents", help="Directory to save/load pretrained agents.")
     args = parser.parse_args()
@@ -98,7 +98,7 @@ def main():
 
     eval_env = make_env()
     ensemble.train(
-        total_timesteps=int(1e6),
+        total_timesteps=int(5e5),
         eval_env=eval_env,
         eval_freq=10_000,
         num_eval_episodes=3,
