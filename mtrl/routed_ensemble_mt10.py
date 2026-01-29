@@ -67,8 +67,7 @@ def main() -> None:
             num_critics=2,
             use_task_weights=True,
             max_assignment_fraction=0.5,
-            init_updates=0,
-
+            init_updates=1e6,
         ),
         training_config=training_config,
         checkpoint=True,
