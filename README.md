@@ -1,6 +1,6 @@
-## Improved Multi-Objective Reinforcement Learning with Routed Ensemble and Objective Attribution
+## Multi-Objective Reinforcement Learning Using Routed Ensembles and Trajectory Attribution
 
-We provide the implementation of Improved Multi-Objective Reinforcement Learning with Routed Ensemble and Objective Attribution。
+We provide the implementation of Multi-Objective Reinforcement Learning Using Routed Ensembles and Trajectory Attribution.
 
 ## Run experiments
 - Metaworld:
