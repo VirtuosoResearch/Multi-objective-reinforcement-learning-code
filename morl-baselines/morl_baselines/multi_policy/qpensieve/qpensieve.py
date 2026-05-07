@@ -145,6 +145,8 @@ class QPensieve(MOAgent, MOPolicy):
         learning_starts: int = 10000,
         gradient_updates: int = 1,
         policy_freq: int = 1,
+        train_preference: Optional[np.ndarray] = None,
+        train_preference_concentration: float = 0.0,
         project_name: str = "MORL-Baselines",
         experiment_name: str = "QPensieve",
         wandb_entity: Optional[str] = None,
@@ -173,6 +175,8 @@ class QPensieve(MOAgent, MOPolicy):
         self.learning_starts = int(learning_starts)
         self.gradient_updates = int(gradient_updates)
         self.policy_freq = int(policy_freq)
+        self.train_preference = self._normalize_preference(train_preference)
+        self.train_preference_concentration = float(train_preference_concentration)
 
         self.policy = QPensieveActor(self.observation_dim, self.action_dim, self.reward_dim, env.action_space, self.net_arch).to(
             self.device
@@ -230,11 +234,34 @@ class QPensieve(MOAgent, MOPolicy):
             "learning_starts": self.learning_starts,
             "gradient_updates": self.gradient_updates,
             "policy_freq": self.policy_freq,
+            "train_preference": None if self.train_preference is None else self.train_preference.tolist(),
+            "train_preference_concentration": self.train_preference_concentration,
             "autotune": self.autotune,
             "seed": self.seed,
         }
 
+    def _normalize_preference(self, preference: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        """Normalize a preference vector to the simplex if provided."""
+        if preference is None:
+            return None
+        preference = np.asarray(preference, dtype=np.float32).reshape(-1)
+        if preference.shape[0] != self.reward_dim:
+            raise ValueError(
+                f"train_preference must have shape ({self.reward_dim},), got {preference.shape!r}"
+            )
+        if np.any(preference < 0):
+            raise ValueError("train_preference must be non-negative.")
+        total = float(preference.sum())
+        if total <= 0:
+            raise ValueError("train_preference must sum to a positive value.")
+        return preference / total
+
     def _sample_preference(self) -> np.ndarray:
+        if self.train_preference is not None:
+            if self.train_preference_concentration <= 0:
+                return self.train_preference.copy()
+            alpha = np.maximum(self.train_preference * self.train_preference_concentration, 1e-3)
+            return self.np_random.dirichlet(alpha).astype(np.float32)
         return random_weights(self.reward_dim, n=1, rng=self.np_random)
 
     def _sample_preference_tensor(self) -> th.Tensor:

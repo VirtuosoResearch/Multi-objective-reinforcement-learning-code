@@ -183,11 +183,17 @@ def log_all_multi_policy_metrics(
         },
         commit=False,
     )
-    front = wandb.Table(
-        columns=[f"objective_{i}" for i in range(1, reward_dim + 1)],
-        data=[p.tolist() for p in filtered_front],
-    )
-    wandb.log({"eval/front": front})
+    try:
+        front = wandb.Table(
+            columns=[f"objective_{i}" for i in range(1, reward_dim + 1)],
+            data=[p.tolist() for p in filtered_front],
+        )
+        wandb.log({"eval/front": front})
+    except (FileNotFoundError, OSError):
+        # wandb.Table materializes through a temp media file on disk; on some Windows
+        # setups the temp directory may disappear during long runs. Scalar metrics above
+        # are the important part of training/eval, so do not crash the run for this.
+        pass
 
     # If PF is known, log the additional metrics
     if ref_front is not None:

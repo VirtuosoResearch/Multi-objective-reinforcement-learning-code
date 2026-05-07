@@ -16,7 +16,7 @@ def make_env():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ensemble-size", type=int, default=7, help="Number of ensemble members.")
+    parser.add_argument("--ensemble-size", type=int, default=3, help="Number of ensemble members.")
     parser.add_argument(
         "--total-timesteps",
         type=int,
