@@ -9,7 +9,7 @@ This experiment ties three pieces together:
 
   2. Ensemble target policy. For any preference lambda the trained ensemble
      induces a target policy pi1 of shape (H, S, A):
-       - 'routed'   : the nearest-centroid expert's greedy policy (hard routing);
+       - 'routed'   : the nearest-centroid expert's deployed policy (hard routing);
        - 'weighted' : a router-responsibility-weighted mixture of expert policies.
 
   3. Weighted estimator. That ensemble policy is evaluated *off-policy* from data
@@ -21,6 +21,14 @@ This experiment ties three pieces together:
 The single global-optimal policy is included as a reference target to show the
 estimator behaves identically regardless of how the target policy is produced --
 routing/ensemble only changes *which* policy is being evaluated.
+
+Note. In this tabular MOMDP the per-preference optimal policy depends only on the
+shared, known dynamics and reward, so well-trained experts' *exploitation*
+policies coincide (routing then leaves the evaluated value unchanged). We
+therefore evaluate the ensemble's *deployed* policy -- the optimistic UCBVI
+policy it would actually run for a preference (coeff_eval>0) -- for which the
+routed and weighted aggregations are genuinely different policies. The
+estimator's job is to recover their value off-policy; that is what we validate.
 
 Outputs: an RMSE table (target type x estimator), a per-preference value check,
 and an RMSE-vs-dataset-size plot saved next to this script.
@@ -76,7 +84,7 @@ def train_routed_ensemble(S, A, H, d, num_experts, num_tasks, conflict,
     set_seed(seed + 123)  # MOMDP.play (training rollouts) uses the global RNG
     ensemble = RoutedEnsembleUCBVI(
         momdp, num_experts,
-        eta=0.3, lambda_mu=1.0, route_temperature=0.6, min_resp=0.02,
+        eta=0.3, lambda_mu=1.0, route_temperature=0.3, min_resp=0.0,
         share_histogram=False,
         coeff_scales=np.linspace(0.6, 1.4, num_experts),
         select_by_value=False, policy_mode="select", routing_mode="pref",
@@ -85,15 +93,15 @@ def train_routed_ensemble(S, A, H, d, num_experts, num_tasks, conflict,
     return momdp, ensemble
 
 
-def ensemble_target_policy(ensemble, momdp, pref, mode, coeff_eval=0.0, eps=0.1):
+def ensemble_target_policy(ensemble, momdp, pref, mode, coeff_eval=0.1, eps=0.1):
     """Frozen target policy (H, S, A) induced by the trained ensemble for ``pref``.
 
     Routing is deterministic in ``pref`` via the learned centroids:
-      mode='routed'   -> nearest-centroid expert's greedy policy (hard routing);
+      mode='routed'   -> nearest-centroid expert's deployed policy (hard routing);
       mode='weighted' -> softmax(-lambda ||c_k - pref||^2) mixture of expert policies.
     The policy is eps-softened so importance ratios stay finite under the uniform
-    behavior policy. coeff_eval=0 uses each expert's pure greedy (no exploration
-    bonus) policy.
+    behavior policy. coeff_eval>0 uses each expert's *deployed* optimistic UCBVI
+    policy (with exploration bonus), for which routed vs weighted genuinely differ.
     """
     reward = scalarize_rewards(momdp.rewards, pref)
     policies = [ensemble.experts[k].get_Q_table(reward, coeff_eval * ensemble.coeff_scales[k])[1]
@@ -187,14 +195,14 @@ def save_plot(K_list, rmse, path, title):
 
 # --------------------------------------------------------------------------- #
 def main():
-    S, A, H, d = 6, 4, 5, 4
+    S, A, H, d = 12, 4, 6, 4
     num_tasks = num_experts = 3
-    conflict = 0.6
+    conflict = 0.7
     eps = 0.1
     K_table, n_seeds = 400, 30
 
     momdp, ensemble = train_routed_ensemble(
-        S, A, H, d, num_experts, num_tasks, conflict, train_K=1000, seed=0)
+        S, A, H, d, num_experts, num_tasks, conflict, train_K=600, seed=0)
     ope = MOMDP_OPE(momdp)
     pi0 = uniform_policy(H, S, A)
 
@@ -218,16 +226,22 @@ def main():
     for t in target_builders:
         print(f"{t:>14}" + "".join(f"{table[t][m]:>12.5f}" for m in METHODS))
 
-    # (2) Per-preference value check for the routed-ensemble target (step-WIS).
-    print("\nRouted-ensemble target -- true value vs step-WIS estimate (K=5000):")
-    print(f"{'pref argmax':>12}{'true V':>12}{'step-WIS':>12}{'opt V':>12}")
+    # (2) Per-preference value check: routed vs weighted ensemble policies, each
+    #     true value vs its step-WIS estimate (these two modes genuinely differ).
+    print("\nPer-pref true value vs step-WIS estimate (K=5000):")
+    print(f"{'pref argmax':>11} | {'routed true':>11}{'routed WIS':>11} | "
+          f"{'wtd true':>11}{'wtd WIS':>11} | {'opt V':>8}")
     for i, pref in enumerate(eval_prefs):
-        pi1 = ensemble_target_policy(ensemble, momdp, pref, "routed", eps=eps)
         data = ope.rollout(pi0, 5000, rng=np.random.default_rng(999 + i))
-        v_true = float(ope.true_value(pi1) @ pref)
-        v_hat = float(pref @ ope.estimate(data, pi0, pi1, weighted=True, stepwise=True))
+        pi_r = ensemble_target_policy(ensemble, momdp, pref, "routed", eps=eps)
+        pi_w = ensemble_target_policy(ensemble, momdp, pref, "weighted", eps=eps)
+        r_true = float(ope.true_value(pi_r) @ pref)
+        r_hat = float(pref @ ope.estimate(data, pi0, pi_r, weighted=True, stepwise=True))
+        w_true = float(ope.true_value(pi_w) @ pref)
+        w_hat = float(pref @ ope.estimate(data, pi0, pi_w, weighted=True, stepwise=True))
         v_opt = float(ope.true_value(single_optimal_policy(momdp, pref, eps)) @ pref)
-        print(f"{int(np.argmax(pref)):>12}{v_true:>12.4f}{v_hat:>12.4f}{v_opt:>12.4f}")
+        print(f"{int(np.argmax(pref)):>11} | {r_true:>11.4f}{r_hat:>11.4f} | "
+              f"{w_true:>11.4f}{w_hat:>11.4f} | {v_opt:>8.4f}")
 
     # (3) RMSE vs dataset size for the routed-ensemble target, with a plot.
     K_list = [50, 100, 200, 500, 1000]
