@@ -3,7 +3,10 @@ import numpy as np
 import json
 import os
 import re
-from scipy.stats import spearmanr
+try:
+    from scipy.stats import spearmanr
+except Exception:  # optional: scipy/numpy version mismatches in some envs
+    spearmanr = None
 from typing import Callable, Literal, Optional
 
 KernelName = Literal["rbf", "linear", "poly"]
@@ -64,7 +67,6 @@ def make_krr_predictor(
     # -------------------- choose gamma --------------------
     if kernel == "rbf" and gamma is None:
         # scikit-learn default: gamma = 1 / n_features
-        print(X.shape)
         gamma = 1.0 / max(1, X.shape[1])
 
     # -------------------- Gram matrix --------------------
@@ -283,21 +285,6 @@ def eval_test_loss(model, loss_fn, load_batch_fn, test_dataset, batch_size, batc
                 break
     return batch_loss_list
 
-def get_all_scores(model, model_path, use_nso, loss_fn, load_batch_fn, test_dataset, test_batch_size=1, test_batch_num=50, metric='loss', device='cuda'):
-    if use_nso:
-        model_file = os.path.join(model_path, f"nso_model_all_1.pth")
-    else:
-        model_file = os.path.join(model_path, f"model_all_1.pth")
-    model.load_state_dict(torch.load(model_file, map_location='cpu'))
-    model.eval()
-    if metric == 'loss':
-        scores = eval_test_loss(model, loss_fn, load_batch_fn, test_dataset, test_batch_size, test_batch_num, device)
-    elif metric == 'margin':
-        scores = eval_test_margin(model, loss_fn, load_batch_fn, test_dataset, test_batch_size, test_batch_num, device)
-    scores = torch.tensor(scores)
-    print("All scores shape:", scores.shape)
-    return scores
-
 def get_subset_scores(model, model_path, model_name, run_name, use_nso, use_sam, train_ids_list, loss_fn, load_batch_fn, test_dataset, test_batch_size=1, test_batch_num=50, metric='loss', device='cuda'):
     if metric == 'loss':
         score_path = './results/scores'
@@ -408,11 +395,12 @@ def kernelsm_score(subset_scores, train_ids_list, test_batch_num=50, num_train=0
         if result['use']:
             errors_list.append(float(result['normalized_error']))
             #residual_error_mse_list.append(float(result['residual_error_mse']))
-            rho, _ = spearmanr(
-                true_scores.detach().cpu().numpy(),
-                pred_scores.detach().cpu().numpy()
-            )
-            spearmans_list.append(float(rho))
+            if spearmanr is not None:
+                rho, _ = spearmanr(
+                    true_scores.detach().cpu().numpy(),
+                    pred_scores.detach().cpu().numpy()
+                )
+                spearmans_list.append(float(rho))
     results = {
         'error': errors_list,
         'spearman_corr': spearmans_list,
