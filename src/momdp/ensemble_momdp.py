@@ -265,6 +265,8 @@ class RoutedEnsembleUCBVI(object):
         init_centroids="dirichlet",
         update_self_only=False,
         self_update_scale=None,
+        is_weighting=None,
+        is_eps=0.1,
         seed=None,
     ):
         super(RoutedEnsembleUCBVI, self).__init__()
@@ -287,6 +289,10 @@ class RoutedEnsembleUCBVI(object):
         self.random_alpha = random_alpha
         self.update_self_only = update_self_only
         self.self_update_scale = self_update_scale
+        if is_weighting not in (None, "IS", "WIS"):
+            raise ValueError("is_weighting must be None, 'IS' or 'WIS'")
+        self.is_weighting = is_weighting
+        self.is_eps = is_eps
         self.rng = np.random.default_rng(seed)
         if init_centroids == "onehot":
             self.centroids = np.zeros((self.K, self.d))
@@ -317,6 +323,45 @@ class RoutedEnsembleUCBVI(object):
         for k in range(self.K):
             pi_ens += weights[k] * policies[k]
         return pi_ens
+
+    def _traj_logratio(self, trajectory, pi_num, pi_den):
+        """log prod_h pi_num(a|s)/pi_den(a|s) along a trajectory.
+
+        Both policies are eps-softened (self.is_eps) so the ratio stays finite
+        even for the experts' deterministic (one-hot) UCBVI policies.
+        """
+        inv_a = self.is_eps / self.A
+        scale = 1.0 - self.is_eps
+        logr = 0.0
+        for h, (x, a, _) in enumerate(trajectory):
+            pn = scale * pi_num[h, x, a] + inv_a
+            pd = scale * pi_den[h, x, a] + inv_a
+            logr += np.log(pn) - np.log(pd)
+        return logr
+
+    def _is_weight_matrix(self, trajectories, policies):
+        """Importance weights for reusing each trajectory to update each expert.
+
+        Entry [j, k] reweights trajectory j -- collected on-policy under
+        policies[j] (behavior) -- to the distribution induced by expert k's
+        policy (target): rho_{j->k} = prod_h pi_k(a|s)/pi_j(a|s). The on-policy
+        case j==k is exactly 1. With is_weighting='WIS' each target column is
+        self-normalized by its mean (Eq. 6 trajectory-wise WIS, applied per
+        target expert), which keeps the per-episode mass added to each expert
+        O(1) and curbs the variance of plain IS.
+        """
+        n = len(trajectories)
+        rho = np.ones((n, self.K))
+        for j, traj in enumerate(trajectories):
+            for k in range(self.K):
+                if k == j:
+                    continue
+                rho[j, k] = np.exp(self._traj_logratio(traj, policies[k], policies[j]))
+        if self.is_weighting == "WIS":
+            col_mean = rho.mean(axis=0, keepdims=True)
+            rho = np.divide(rho, col_mean, out=np.zeros_like(rho),
+                            where=col_mean > 0)
+        return rho
 
     def _score_trajectory(self, Q, trajectory):
         score = 0.0
@@ -365,11 +410,13 @@ class RoutedEnsembleUCBVI(object):
                     self.experts[k].update_history(trajectories[k], weight=resp[k] * weight_scale)
                 avg_resp = resp
             else:
+                isw = self._is_weight_matrix(trajectories, policies) if self.is_weighting else None
                 total_resp = np.zeros(self.K)
-                for trajectory in trajectories:
+                for j, trajectory in enumerate(trajectories):
                     resp = self._get_routing_resp(pref, Qs, trajectories, trajectory, reward=reward)
                     for k in range(self.K):
-                        self.experts[k].update_history(trajectory, weight=resp[k])
+                        weight = resp[k] if isw is None else resp[k] * isw[j, k]
+                        self.experts[k].update_history(trajectory, weight=weight)
                     total_resp += resp
                 avg_resp = total_resp / max(len(trajectories), 1)
             for k in range(self.K):

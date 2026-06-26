@@ -69,15 +69,26 @@ METHODS = {  # name -> (weighted, stepwise)
 # Routing & ensemble
 # --------------------------------------------------------------------------- #
 def train_routed_ensemble(S, A, H, d, num_experts, num_tasks, conflict,
-                          train_K, coeff=0.1, seed=0):
+                          train_K, coeff=0.1, seed=0, is_weighting=None,
+                          is_eps=0.1, momdp=None):
     """Train a RoutedEnsembleUCBVI on a ConflictMOMDP with clustered preferences.
 
     Returns the (conflict) MOMDP and the trained ensemble. share_histogram=False
     so experts that the router sends to different clusters accumulate different
     empirical dynamics and hence genuinely different policies.
+
+    ``is_weighting`` controls the importance weighting applied to the experts'
+    learning updates in ``online_game`` (see RoutedEnsembleUCBVI):
+      None  -> raw ensemble: each trajectory updates an expert with weight
+               resp_k only (no off-policy correction);
+      'IS'  -> multiply by rho_{j->k} = prod_h pi_k(a|s)/pi_j(a|s);
+      'WIS' -> the self-normalized (weighted-importance) variant of that ratio.
+    Pass a shared ``momdp`` to train several variants on the *same* environment
+    and training sequence so the only difference is the learning weighting.
     """
-    momdp = ConflictMOMDP(S, A, H, d, conflict=conflict, noise_scale=0.05,
-                          num_conflicting=num_tasks, seed=seed)
+    if momdp is None:
+        momdp = ConflictMOMDP(S, A, H, d, conflict=conflict, noise_scale=0.05,
+                              num_conflicting=num_tasks, seed=seed)
     rewards, prefs = build_reward_sequence(
         momdp, train_K, pref_mode="clustered", pref_clusters=num_tasks,
         pref_concentration=0.02, seed=seed + 1)
@@ -88,12 +99,13 @@ def train_routed_ensemble(S, A, H, d, num_experts, num_tasks, conflict,
         share_histogram=False,
         coeff_scales=np.linspace(0.6, 1.4, num_experts),
         select_by_value=False, policy_mode="select", routing_mode="pref",
-        init_centroids="dirichlet", seed=seed + 2)
+        init_centroids="dirichlet", is_weighting=is_weighting, is_eps=is_eps,
+        seed=seed + 2)
     ensemble.online_game(rewards, prefs, coeff=coeff, task_ids=None)
     return momdp, ensemble
 
 
-def ensemble_target_policy(ensemble, momdp, pref, mode, coeff_eval=0.1, eps=0.1):
+def ensemble_target_policy(ensemble, momdp, pref, mode="routed", coeff_eval=0.1, eps=0.1):
     """Frozen target policy (H, S, A) induced by the trained ensemble for ``pref``.
 
     Routing is deterministic in ``pref`` via the learned centroids:
@@ -194,6 +206,75 @@ def save_plot(K_list, rmse, path, title):
 
 
 # --------------------------------------------------------------------------- #
+# Learning with vs without importance weighting
+# --------------------------------------------------------------------------- #
+def optimal_value(momdp, pref):
+    """Exact optimal scalarized value V*(s_0) for ``pref`` (true dynamics)."""
+    return float(momdp._get_V_opt(scalarize_rewards(momdp.rewards, pref))[0])
+
+
+def deployed_value(ope, ensemble, momdp, pref, mode, eps):
+    """True scalarized value of the ensemble's deployed policy for ``pref``."""
+    pi = ensemble_target_policy(ensemble, momdp, pref, mode, eps=eps)
+    return float(ope.true_value(pi) @ pref)
+
+
+def learning_weighting_comparison(ope, momdp, ensembles, eval_prefs, eps,
+                                  mode="routed"):
+    """Compare learned-policy quality across learning-weighting variants.
+
+    For each eval preference, reports the true scalarized value of each variant's
+    deployed (``mode``) policy against the optimal value, and the regret
+    (V* - V^pi). Lower regret == the importance weighting produced a better
+    ensemble policy. Returns per-variant arrays of value and regret.
+    """
+    names = list(ensembles)
+    value = {n: np.zeros(len(eval_prefs)) for n in names}
+    regret = {n: np.zeros(len(eval_prefs)) for n in names}
+    v_opt = np.array([optimal_value(momdp, p) for p in eval_prefs])
+    for i, pref in enumerate(eval_prefs):
+        for n in names:
+            v = deployed_value(ope, ensembles[n], momdp, pref, mode, eps)
+            value[n][i] = v
+            regret[n][i] = v_opt[i] - v
+
+    print(f"\nLearned {mode}-ensemble policy: true value vs optimal "
+          f"(over {len(eval_prefs)} eval prefs)")
+    print(f"{'pref argmax':>11}" + "".join(f"{n:>12}" for n in names)
+          + f"{'optimal':>12}")
+    for i, pref in enumerate(eval_prefs):
+        print(f"{int(np.argmax(pref)):>11}"
+              + "".join(f"{value[n][i]:>12.4f}" for n in names)
+              + f"{v_opt[i]:>12.4f}")
+    print(f"{'mean regret':>11}"
+          + "".join(f"{regret[n].mean():>12.4f}" for n in names)
+          + f"{0.0:>12.4f}")
+    return value, regret
+
+
+def save_regret_bar(names, regret, path, title):
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as e:  # plotting is optional
+        print(f"\n(Skipping plot: matplotlib unavailable -- {e})")
+        return
+    means = [regret[n].mean() for n in names]
+    errs = [regret[n].std() / max(len(regret[n]), 1) ** 0.5 for n in names]
+    plt.figure(figsize=(5, 4))
+    plt.bar(range(len(names)), means, yerr=errs, capsize=4,
+            color=["#888888", "#4c72b0", "#dd8452"][:len(names)])
+    plt.xticks(range(len(names)), names)
+    plt.ylabel("mean regret  (V* - V^pi)")
+    plt.title(title)
+    plt.grid(True, axis="y", ls=":", alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(path, dpi=150)
+    print(f"\nSaved regret comparison plot -> {path}")
+
+
+# --------------------------------------------------------------------------- #
 def main():
     S, A, H, d = 12, 4, 6, 4
     num_tasks = num_experts = 3
@@ -201,59 +282,57 @@ def main():
     eps = 0.1
     K_table, n_seeds = 400, 30
 
-    momdp, ensemble = train_routed_ensemble(
-        S, A, H, d, num_experts, num_tasks, conflict, train_K=600, seed=0)
+    # Train three ensembles that differ ONLY in the importance weighting applied
+    # to their learning updates, on a shared MOMDP + training sequence (same seed).
+    #   raw : no weighting (each trajectory updates an expert with weight resp_k);
+    #   IS  : weight resp_k by the importance ratio rho_{j->k};
+    #   WIS : the self-normalized (weighted-importance) version of that ratio.
+    variants = {"raw": None, "IS": "IS", "WIS": "WIS"}
+    momdp = ConflictMOMDP(S, A, H, d, conflict=conflict, noise_scale=0.05,
+                          num_conflicting=num_tasks, seed=0)
+    ensembles = {}
+    for name, mode in variants.items():
+        _, ensembles[name] = train_routed_ensemble(
+            S, A, H, d, num_experts, num_tasks, conflict, train_K=600, seed=0,
+            is_weighting=mode, is_eps=eps, momdp=momdp)
     ope = MOMDP_OPE(momdp)
     pi0 = uniform_policy(H, S, A)
 
     eval_prefs = sample_clustered_preferences(
         4, d, clusters=num_tasks, concentration=0.02, rng=np.random.default_rng(777))
 
+    print(f"MOMDP ensemble learning: weighted-IS vs raw  (S={S}, A={A}, H={H}, "
+          f"d={d}, experts={num_experts}, conflict={conflict})")
+
+    # (1) Headline: does importance weighting during learning yield a better
+    #     ensemble policy? Compare true value / regret of each variant's policy.
+    #     Deployment uses hard routing (nearest-centroid expert).
+    _, regret = learning_weighting_comparison(
+        ope, momdp, ensembles, eval_prefs, eps, mode="routed")
+    save_regret_bar(list(variants), regret,
+                    os.path.join(HERE, "ensemble_learning_weighting_regret.png"),
+                    title="Ensemble learning: weighted-IS vs raw (routed policy)")
+
+    # (2) Sanity check: the weighted off-policy estimator still recovers each
+    #     learned policy's value. RMSE (target type x estimator) for the routed
+    #     policy of the raw vs WIS-learned ensemble.
     target_builders = {
-        "single-opt": lambda pref: single_optimal_policy(momdp, pref, eps),
-        "routed-ens": lambda pref: ensemble_target_policy(ensemble, momdp, pref, "routed", eps=eps),
-        "weighted-ens": lambda pref: ensemble_target_policy(ensemble, momdp, pref, "weighted", eps=eps),
+        f"routed-{n}": (lambda pref, e=ensembles[n]:
+                        ensemble_target_policy(e, momdp, pref, "routed", eps=eps))
+        for n in ("raw", "WIS")
     }
-
-    print(f"MOMDP routing+ensemble OPE  (S={S}, A={A}, H={H}, d={d}, "
-          f"experts={num_experts}, conflict={conflict})")
-
-    # (1) RMSE table: target type x estimator.
     table = rmse_table(ope, pi0, target_builders, eval_prefs, K_table, n_seeds)
-    print(f"\nRMSE of scalarized value over {len(eval_prefs)} eval prefs x "
+    print(f"\nOPE RMSE of scalarized value over {len(eval_prefs)} eval prefs x "
           f"{n_seeds} seeds, K={K_table}:")
     print(f"{'target':>14}" + "".join(f"{m:>12}" for m in METHODS))
     for t in target_builders:
         print(f"{t:>14}" + "".join(f"{table[t][m]:>12.5f}" for m in METHODS))
 
-    # (2) Per-preference value check: routed vs weighted ensemble policies, each
-    #     true value vs its step-WIS estimate (these two modes genuinely differ).
-    print("\nPer-pref true value vs step-WIS estimate (K=5000):")
-    print(f"{'pref argmax':>11} | {'routed true':>11}{'routed WIS':>11} | "
-          f"{'wtd true':>11}{'wtd WIS':>11} | {'opt V':>8}")
-    for i, pref in enumerate(eval_prefs):
-        data = ope.rollout(pi0, 5000, rng=np.random.default_rng(999 + i))
-        pi_r = ensemble_target_policy(ensemble, momdp, pref, "routed", eps=eps)
-        pi_w = ensemble_target_policy(ensemble, momdp, pref, "weighted", eps=eps)
-        r_true = float(ope.true_value(pi_r) @ pref)
-        r_hat = float(pref @ ope.estimate(data, pi0, pi_r, weighted=True, stepwise=True))
-        w_true = float(ope.true_value(pi_w) @ pref)
-        w_hat = float(pref @ ope.estimate(data, pi0, pi_w, weighted=True, stepwise=True))
-        v_opt = float(ope.true_value(single_optimal_policy(momdp, pref, eps)) @ pref)
-        print(f"{int(np.argmax(pref)):>11} | {r_true:>11.4f}{r_hat:>11.4f} | "
-              f"{w_true:>11.4f}{w_hat:>11.4f} | {v_opt:>8.4f}")
-
-    # (3) RMSE vs dataset size for the routed-ensemble target, with a plot.
-    K_list = [50, 100, 200, 500, 1000]
-    pref0 = eval_prefs[0]
-    pi1 = ensemble_target_policy(ensemble, momdp, pref0, "routed", eps=eps)
-    rmse = rmse_vs_size(ope, pi0, pi1, pref0, K_list, n_seeds=20)
-    save_plot(K_list, rmse, os.path.join(HERE, "weighted_estimator_ensemble_rmse.png"),
-              title="OPE of a routed-ensemble policy in a MOMDP")
-
-    print("\nTakeaway: the weighted estimators (Eq. 6/7) off-policy-evaluate the "
-          "routed/weighted ensemble policy accurately (step-WIS best), exactly as "
-          "for a single policy -- routing/ensemble only changes the target.")
+    print("\nTakeaway: 'raw' learns the ensemble with no off-policy correction; "
+          "'IS'/'WIS' reweight each expert's learning updates by the importance "
+          "ratio (WIS self-normalized). Lower mean regret == the weighting "
+          "produced a better ensemble policy; the OPE table confirms the weighted "
+          "estimator still recovers each learned policy off-policy.")
 
 
 if __name__ == "__main__":
