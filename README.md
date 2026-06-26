@@ -16,3 +16,7 @@ We provide the implementation of Multi-Objective Reinforcement Learning Using Ro
   cd ./examples
   python ensemble_halfcheetah.py
   ```
+
+## RL transfer and attribution
+
+Document: https://docs.google.com/document/d/1ictIKs4Psqw_M2rhJ_XsMQxseVcHTyUehGydz16r73g/edit?usp=sharing

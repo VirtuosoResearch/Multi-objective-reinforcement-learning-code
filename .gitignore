@@ -1,10 +1,17 @@
 checkpoints/
 indices/
 __pycache__/
+models_lunarlander/
+outputs/
+tb_logs/
+wandb/
 *.pyc
+*.pkl
 results/
 logs/
 dataset/
+data/
+subset_indices/
 
 *.egg-info/
 *.pdf
