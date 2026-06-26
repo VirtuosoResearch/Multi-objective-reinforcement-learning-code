@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import tyro
+import wandb
 
 from metaworld_algorithms.config.networks import (
     ContinuousActionPolicyConfig,
@@ -20,9 +21,11 @@ class Args:
     seed: int = 1
     track: bool = True
     wandb_project: str | None = 'multitask-RL'
-    wandb_entity: str | None = "zszhang-northeastern-university"
+    wandb_entity: str | None = ""
+    wandb_force_new_id: bool = True
     data_dir: Path = Path("./run_results")
-    resume: bool = False
+    resume: bool = True
+    eval_only: bool = True
 
 
 def main() -> None:
@@ -30,11 +33,12 @@ def main() -> None:
 
     num_tasks = 10
     num_experts = 3
-    expert_task_ids = [
-        [1, 2, 4, 5, 7],
-        [3, 6],
-        [0, 8, 9],
-    ]
+
+    training_config = OffPolicyTrainingConfig(
+        total_steps=0 if args.eval_only else int(2e7),
+        buffer_size=int(1e6),
+        batch_size=1280,
+    )
 
     run = Run(
         run_name="mt10_routed_ensemble",
@@ -62,20 +66,10 @@ def main() -> None:
             ),
             num_critics=2,
             use_task_weights=True,
-            lambda_mu=0.1,
-            centroid_eta=0.1,
-            grad_ema_beta=0.1,
-            #score_type="gradient_similarity",
-            score_type="centroid_only",
-            #update_mode="single_policy",
-            update_mode="routed",
-            fixed_task_assignments=tuple(tuple(ids) for ids in expert_task_ids),
+            max_assignment_fraction=0.5,
+            init_updates=1e6,
         ),
-        training_config=OffPolicyTrainingConfig(
-            total_steps=int(2e7),
-            buffer_size=int(1e6),
-            batch_size=1280,
-        ),
+        training_config=training_config,
         checkpoint=True,
         resume=args.resume,
     )
@@ -87,6 +81,8 @@ def main() -> None:
             entity=args.wandb_entity,
             config=run,
             resume="allow",
+            settings=wandb.Settings(init_timeout=120),
+            force_new_id=args.wandb_force_new_id,
         )
 
     run.start()

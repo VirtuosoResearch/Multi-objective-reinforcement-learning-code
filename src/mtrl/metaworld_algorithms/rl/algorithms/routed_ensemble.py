@@ -1,4 +1,5 @@
 import dataclasses
+from pathlib import Path
 from typing import Protocol, Self, override
 
 import jax
@@ -6,7 +7,7 @@ import jax.flatten_util as flatten_util
 import jax.numpy as jnp
 import numpy as np
 import numpy.typing as npt
-from flax import struct
+from flax import serialization, struct
 from jaxtyping import Array, Float
 
 from metaworld_algorithms.config.envs import EnvConfig
@@ -39,7 +40,7 @@ class GradientSimilarityScore:
 
 @dataclasses.dataclass(frozen=True)
 class RoutedEnsembleConfig(AlgorithmConfig):
-    num_experts: int = 4
+    num_experts: int = 3
     actor_config: ContinuousActionPolicyConfig = ContinuousActionPolicyConfig()
     critic_config: QValueFunctionConfig = QValueFunctionConfig()
     temperature_optimizer_config: OptimizerConfig = OptimizerConfig(max_grad_norm=None)
@@ -58,6 +59,10 @@ class RoutedEnsembleConfig(AlgorithmConfig):
     update_mode: str = "single_policy"
     routing_cache_steps: int = 1
     fixed_task_assignments: tuple[tuple[int, ...], ...] | None = None
+    init_updates: int = 0
+    init_policy_path: str | None = None
+    save_init_policy_path: str | None = None
+    max_assignment_fraction: float = 0.5
 
 
 class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
@@ -82,6 +87,15 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
     score_fn: ScoreFn = struct.field(pytree_node=False)
     score_type: str = struct.field(pytree_node=False)
     update_mode: str = struct.field(pytree_node=False)
+    init_updates_remaining: int = struct.field(pytree_node=False)
+    init_policy_path: str | None = struct.field(pytree_node=False)
+    save_init_policy_path: str | None = struct.field(pytree_node=False)
+    init_policy_saved: bool = struct.field(pytree_node=False)
+    sampling_key: jax.Array = struct.field(pytree_node=False)
+    max_assignment_fraction: float = struct.field(pytree_node=False)
+    eval_task_expert_map: npt.NDArray[np.int64] | None = struct.field(
+        pytree_node=False
+    )
 
     @override
     @staticmethod
@@ -108,6 +122,60 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
             MTSAC.initialize(base_config, env_config, seed=int(expert_seed))
             for expert_seed in expert_seeds
         )
+        init_updates_remaining = config.init_updates
+        init_policy_saved = config.save_init_policy_path is None
+
+        run_results_candidates = [
+            Path("run_results"),
+            Path(__file__).resolve().parents[4]
+            / "mtrl"
+            / "examples"
+            / "multi_task"
+            / "run_results",
+        ]
+        init_policy_paths: list[Path] = []
+        for candidate in run_results_candidates:
+            if candidate.is_dir():
+                init_policy_paths = [
+                    candidate / f"init_policy_{idx}.msgpack" for idx in range(1, 4)
+                ]
+                if all(path.is_file() for path in init_policy_paths):
+                    break
+                init_policy_paths = []
+
+        if init_policy_paths:
+            loaded_experts: list[MTSAC] = []
+            for idx, path in enumerate(init_policy_paths):
+                if idx >= config.num_experts:
+                    break
+                loaded_experts.append(
+                    serialization.from_bytes(experts[idx], path.read_bytes())
+                )
+            if loaded_experts:
+                experts = tuple(
+                    loaded_experts
+                    + list(experts[len(loaded_experts) : config.num_experts])
+                )
+                init_updates_remaining = 0
+                print(
+                    "Loaded init policies:",
+                    ", ".join(str(path) for path in init_policy_paths[: len(loaded_experts)]),
+                )
+        elif config.init_policy_path is not None:
+            init_path = Path(config.init_policy_path)
+            if init_path.is_file():
+                restored = serialization.from_bytes(
+                    experts[0], init_path.read_bytes()
+                )
+                experts = tuple([restored] * config.num_experts)
+                init_updates_remaining = 0
+                print(f"Loaded init policy: {init_path}")
+            else:
+                print(
+                    f"WARNING: init_policy_path not found: {config.init_policy_path}"
+                )
+        else:
+            print("WARNING: init policies not found in run_results.")
 
         centroid_key = jax.random.PRNGKey(seed)
         # Initialize per-expert task preference centroids for routing.
@@ -166,7 +234,12 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
         # Select routing score function; some modes reuse gradient similarity scoring.
         if config.score_type == "gradient_similarity":
             score_fn: ScoreFn = GradientSimilarityScore(eps=config.score_eps)
-        elif config.score_type in {"reward_rank", "centroid_only", "random_fixed"}:
+        elif config.score_type in {
+            "reward_rank",
+            "centroid_only",
+            "random_fixed",
+            "reinforce",
+        }:
             score_fn = GradientSimilarityScore(eps=config.score_eps)
         else:
             raise ValueError(f"Unknown score_type: {config.score_type}")
@@ -187,6 +260,8 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
             (config.num_experts, flat_params.shape[0]), dtype=flat_params.dtype
         )
 
+        sampling_key = jax.random.PRNGKey(seed + 1)
+
         return RoutedEnsembleMTSAC(
             num_tasks=config.num_tasks,
             gamma=config.gamma,
@@ -206,6 +281,13 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
             score_fn=score_fn,
             score_type=config.score_type,
             update_mode=config.update_mode,
+            init_updates_remaining=init_updates_remaining,
+            init_policy_path=config.init_policy_path,
+            save_init_policy_path=config.save_init_policy_path,
+            init_policy_saved=init_policy_saved,
+            sampling_key=sampling_key,
+            max_assignment_fraction=config.max_assignment_fraction,
+            eval_task_expert_map=None,
         )
 
     @override
@@ -272,6 +354,88 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
         min_q_values = jnp.min(q_values, axis=0)
         return jnp.mean(min_q_values)
 
+    def _compute_sample_values(
+        self, expert: MTSAC, observations: jax.Array, actions: jax.Array
+    ) -> jax.Array:
+        q_values = expert.critic.apply_fn(expert.critic.params, observations, actions)
+        return jnp.min(q_values, axis=0)
+
+    @staticmethod
+    @jax.jit
+    def _compute_expert_values(
+        experts: tuple[MTSAC, ...],
+        observations: jax.Array,
+        actions: jax.Array,
+    ) -> jax.Array:
+        def expert_value(expert: MTSAC, expert_actions: jax.Array) -> jax.Array:
+            q_values = expert.critic.apply_fn(
+                expert.critic.params, observations, expert_actions
+            )
+            return jnp.min(q_values, axis=0)
+
+        if actions.ndim == 2:
+            return jnp.stack(
+                [expert_value(expert, actions) for expert in experts], axis=0
+            )
+        return jnp.stack(
+            [
+                expert_value(expert, actions[idx])
+                for idx, expert in enumerate(experts)
+            ],
+            axis=0,
+        )
+
+    def _assign_samples_by_value(
+        self, values: npt.NDArray[np.floating]
+    ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
+        num_experts, batch_size = values.shape
+        max_count = max(1, int(np.floor(self.max_assignment_fraction * batch_size)))
+        preferences = np.argsort(-values, axis=0)
+        if num_experts > 1:
+            top_values = values[preferences[0], np.arange(batch_size)]
+            second_values = values[preferences[1], np.arange(batch_size)]
+            priorities = top_values - second_values
+        else:
+            priorities = values[preferences[0], np.arange(batch_size)]
+        order = np.argsort(-priorities)
+
+        assignments = np.full(batch_size, -1, dtype=np.int64)
+        counts = np.zeros(num_experts, dtype=np.int64)
+
+        for idx in order:
+            for rank in range(num_experts):
+                expert_idx = int(preferences[rank, idx])
+                if counts[expert_idx] < max_count:
+                    assignments[idx] = expert_idx
+                    counts[expert_idx] += 1
+                    break
+            if assignments[idx] == -1:
+                expert_idx = int(preferences[0, idx])
+                assignments[idx] = expert_idx
+                counts[expert_idx] += 1
+
+        return assignments, counts
+
+    def _compute_log_prob_scores(
+        self,
+        expert: MTSAC,
+        observations: jax.Array,
+        actions: jax.Array,
+    ) -> jax.Array:
+        dist = expert.actor.apply_fn(expert.actor.params, observations)
+        log_prob = dist.log_prob(actions)
+        if log_prob.ndim > 1:
+            log_prob = log_prob.sum(axis=-1)
+        return log_prob
+
+    def _maybe_save_init_policy(self, expert: MTSAC) -> bool:
+        if self.save_init_policy_path is None or self.init_policy_saved:
+            return self.init_policy_saved
+        save_path = Path(self.save_init_policy_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        save_path.write_bytes(serialization.to_bytes(expert))
+        return True
+
     def _split_data_by_tasks(
         self,
         data: ReplayBufferSamples,
@@ -291,180 +455,119 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
 
     @override
     def sample_action(self, observation: Observation) -> tuple[Self, Action]:
-        # Sample actions from all experts, then select by routed expert per task.
-        task_ids = observation[..., -self.num_tasks :]
-        expert_indices = self._select_experts(task_ids)
+        if self.init_updates_remaining > 0:
+            experts = list(self.experts)
+            experts[0], actions = experts[0].sample_action(observation)
+            return self.replace(experts=tuple(experts)), actions
 
-        new_experts = []
-        all_actions = []
-        for expert in self.experts:
-            expert, actions = expert.sample_action(observation)
-            new_experts.append(expert)
-            all_actions.append(actions)
-
-        actions_by_expert = np.stack(all_actions, axis=0)
-        selected_actions = actions_by_expert[expert_indices, np.arange(self.num_tasks)]
-        return self.replace(experts=tuple(new_experts)), selected_actions
+        sampling_key, expert_key = jax.random.split(self.sampling_key)
+        expert_idx = int(
+            jax.device_get(jax.random.randint(expert_key, (), 0, self.num_experts))
+        )
+        experts = list(self.experts)
+        experts[expert_idx], actions = experts[expert_idx].sample_action(observation)
+        return (
+            self.replace(experts=tuple(experts), sampling_key=sampling_key),
+            actions,
+        )
 
     @override
     def eval_action(self, observations: Observation) -> Action:
-        # Deterministic action selection routed by task-specific expert.
-        task_ids = observations[..., -self.num_tasks :]
-        expert_indices = self._select_experts(task_ids)
+        if self.init_updates_remaining > 0:
+            return self.experts[0].eval_action(observations)
+
+        if self.eval_task_expert_map is not None:
+            task_ids = observations[..., -self.num_tasks :]
+            if observations.ndim == 1:
+                task_indices = np.array([int(np.argmax(task_ids))])
+            else:
+                task_indices = np.asarray(np.argmax(task_ids, axis=1))
+            expert_indices = self.eval_task_expert_map[task_indices]
+            actions_by_expert = np.stack(
+                [expert.eval_action(observations) for expert in self.experts], axis=0
+            )
+            num_envs = observations.shape[0] if observations.ndim > 1 else 1
+            selected_actions = actions_by_expert[expert_indices, np.arange(num_envs)]
+            if observations.ndim == 1:
+                return selected_actions.reshape(-1)
+            return selected_actions
 
         actions_by_expert = np.stack(
             [expert.eval_action(observations) for expert in self.experts], axis=0
         )
-        return actions_by_expert[expert_indices, np.arange(self.num_tasks)]
+        obs = jnp.asarray(observations)
+        values = self._compute_expert_values(
+            self.experts, obs, jnp.asarray(actions_by_expert)
+        )
+        if values.ndim > 2:
+            values = jnp.squeeze(values, axis=-1)
+        expert_indices = np.asarray(jax.device_get(jnp.argmax(values, axis=0)))
+        if expert_indices.ndim > 1:
+            expert_indices = np.squeeze(expert_indices, axis=-1)
+
+        num_envs = observations.shape[0] if observations.ndim > 1 else 1
+        selected_actions = actions_by_expert[expert_indices, np.arange(num_envs)]
+        if observations.ndim == 1:
+            return selected_actions.reshape(-1)
+        return selected_actions
 
     @override
     def update(self, data: ReplayBufferSamples) -> tuple[Self, LogDict]:
-        # Train experts either on shared data (single_policy) or routed data.
+        # Train experts on batches assigned by value-based routing.
         experts = list(self.experts)
         centroids = self.centroids
         grad_ema = self.grad_ema
-        logs_accum: dict[str, list[float]] = {}
 
-        if self.update_mode == "single_policy":
-            # Update every expert on the same batch; no routing.
-            for expert_idx, expert in enumerate(experts):
-                experts[expert_idx], expert_logs = expert.update(data)
-                for key, value in expert_logs.items():
-                    logs_accum.setdefault(key, []).append(
-                        float(jax.device_get(value))
-                    )
-            logs = {key: float(np.mean(values)) for key, values in logs_accum.items()}
-            centroid_values = np.asarray(jax.device_get(centroids))
-            for expert_idx in range(self.num_experts):
-                for task_idx in range(self.num_tasks):
-                    logs[
-                        f"routing/preference_expert_{expert_idx}_task_{task_idx}"
-                    ] = float(centroid_values[expert_idx, task_idx])
+        if self.init_updates_remaining > 0:
+            experts[0], expert_logs = experts[0].update(data)
+            init_updates_remaining = self.init_updates_remaining - 1
+            logs = {
+                f"pretrain/{key}": float(jax.device_get(value))
+                for key, value in expert_logs.items()
+            }
+            logs["pretrain/steps_remaining"] = float(init_updates_remaining)
+            init_policy_saved = self.init_policy_saved
+            if init_updates_remaining == 0:
+                base_expert = experts[0]
+                experts = [base_expert] * self.num_experts
+                grad_ema = jnp.zeros_like(self.grad_ema)
+                init_policy_saved = self._maybe_save_init_policy(base_expert)
             return (
                 self.replace(
                     experts=tuple(experts),
                     centroids=centroids,
                     grad_ema=grad_ema,
+                    init_updates_remaining=init_updates_remaining,
+                    init_policy_saved=init_policy_saved,
                 ),
                 logs,
             )
 
-        if self.update_mode != "routed":
-            raise ValueError(f"Unknown update_mode: {self.update_mode}")
+        obs = jnp.asarray(data.observations)
+        actions = jnp.asarray(data.actions)
+        value_matrix = self._compute_expert_values(self.experts, obs, actions)
+        values = np.asarray(jax.device_get(value_matrix))
+        if values.ndim > 2:
+            values = np.squeeze(values, axis=-1)
+        assignments, sample_counts = self._assign_samples_by_value(values)
 
-        # Optionally reuse cached routing assignments for multiple steps.
-        use_cache = self.routing_cache_steps > 1 and self.routing_cache_remaining > 0
-        assignment_counts = self.cached_assignment_counts
-        sample_counts = self.cached_sample_counts
-        expert_batches = list(self.cached_expert_batches)
-
-        if not use_cache:
-            # Split batch by task and assign each task to the best expert.
-            task_ids = data.observations[..., -self.num_tasks :]
-            split_data = self._split_data_by_tasks(data, task_ids)
-
-            assignments = np.zeros(self.num_tasks, dtype=np.int64)
-
-            for task_idx in range(self.num_tasks):
-                task_data = ReplayBufferSamples(
-                    observations=split_data.observations[task_idx],
-                    actions=split_data.actions[task_idx],
-                    next_observations=split_data.next_observations[task_idx],
-                    dones=split_data.dones[task_idx],
-                    rewards=split_data.rewards[task_idx],
+        expert_batches: list[ReplayBufferSamples | None] = []
+        for expert_idx in range(self.num_experts):
+            sample_mask = assignments == expert_idx
+            count = int(np.sum(sample_mask))
+            if count == 0:
+                expert_batches.append(None)
+                continue
+            expert_batches.append(
+                ReplayBufferSamples(
+                    observations=data.observations[sample_mask],
+                    actions=data.actions[sample_mask],
+                    next_observations=data.next_observations[sample_mask],
+                    dones=data.dones[sample_mask],
+                    rewards=data.rewards[sample_mask],
                 )
-                obs = jnp.asarray(task_data.observations)
-                actions = jnp.asarray(task_data.actions)
+            )
 
-                grad_vectors = None
-                if self.score_type == "random_fixed":
-                    expert_idx = int(self.task_expert_map[task_idx])
-                    scores = None
-                elif self.score_type == "gradient_similarity":
-                    # Prefer experts whose gradient aligns with their EMA.
-                    grad_vectors = []
-                    scores = []
-                    for expert_idx, expert in enumerate(experts):
-                        grad_vector = self._compute_policy_grad_vector(
-                            expert.actor, obs, actions
-                        )
-                        grad_vectors.append(grad_vector)
-                        scores.append(self.score_fn(grad_vector, grad_ema[expert_idx]))
-                    scores = jnp.stack(scores)
-                elif self.score_type == "reward_rank":
-                    # Prefer experts with higher expected min-Q on task data.
-                    scores = jnp.stack(
-                        [self._compute_reward_score(expert, obs) for expert in experts]
-                    )
-                elif self.score_type == "centroid_only":
-                    # Ignore scores and route solely by centroid proximity.
-                    scores = jnp.zeros((self.num_experts,), dtype=centroids.dtype)
-                else:
-                    raise ValueError(f"Unknown score_type: {self.score_type}")
-
-                w_t = jax.nn.one_hot(task_idx, self.num_tasks)
-                if scores is not None:
-                    # Combine task-score with a centroid penalty to discourage drift.
-                    centroid_penalty = -self.lambda_mu * jnp.sum(
-                        (centroids - w_t) ** 2, axis=1
-                    )
-                    total_scores = scores + centroid_penalty
-                    expert_idx = int(jax.device_get(jnp.argmax(total_scores)))
-                assignments[task_idx] = expert_idx
-
-                # Update routed expert's centroid and gradient EMA.
-                if self.score_type != "centroid_only":
-                    centroids = centroids.at[expert_idx].set(
-                        (1 - self.centroid_eta) * centroids[expert_idx]
-                        + self.centroid_eta * w_t
-                    )
-                if grad_vectors is not None:
-                    grad_ema = grad_ema.at[expert_idx].set(
-                        (1 - self.grad_ema_beta) * grad_ema[expert_idx]
-                        + self.grad_ema_beta * grad_vectors[expert_idx]
-                    )
-
-            # Dispatch each sample to the expert assigned to its task.
-            sample_task_ids = np.argmax(np.asarray(task_ids), axis=1)
-            expert_batches = []
-            sample_counts = np.zeros(self.num_experts, dtype=np.int64)
-            for expert_idx in range(self.num_experts):
-                sample_mask = assignments[sample_task_ids] == expert_idx
-                count = int(np.sum(sample_mask))
-                sample_counts[expert_idx] = count
-                if count == 0:
-                    expert_batches.append(None)
-                    continue
-                expert_batches.append(
-                    ReplayBufferSamples(
-                        observations=data.observations[sample_mask],
-                        actions=data.actions[sample_mask],
-                        next_observations=data.next_observations[sample_mask],
-                        dones=data.dones[sample_mask],
-                        rewards=data.rewards[sample_mask],
-                    )
-                )
-
-            assignment_counts = np.bincount(assignments, minlength=self.num_experts)
-            if self.routing_cache_steps > 1:
-                # Cache routing decisions to reuse for the next steps.
-                routing_cache_remaining = self.routing_cache_steps - 1
-                cached_expert_batches = tuple(expert_batches)
-                cached_assignment_counts = assignment_counts
-                cached_sample_counts = sample_counts
-            else:
-                routing_cache_remaining = 0
-                cached_expert_batches = tuple([None] * self.num_experts)
-                cached_assignment_counts = assignment_counts
-                cached_sample_counts = sample_counts
-        else:
-            # Reuse cached routing decisions and expert-specific batches.
-            routing_cache_remaining = self.routing_cache_remaining - 1
-            cached_expert_batches = self.cached_expert_batches
-            cached_assignment_counts = self.cached_assignment_counts
-            cached_sample_counts = self.cached_sample_counts
-
-        # Update each expert on its routed sub-batch and weight logs by samples.
         logs_weighted: dict[str, float] = {}
         total_weight = 0
         for expert_idx, expert in enumerate(experts):
@@ -484,24 +587,24 @@ class RoutedEnsembleMTSAC(OffPolicyAlgorithm[RoutedEnsembleConfig]):
             if total_weight > 0
             else {}
         )
-        for expert_idx, count in enumerate(assignment_counts):
+        for expert_idx, count in enumerate(sample_counts):
             logs[f"routing/expert_{expert_idx}_count"] = float(count)
-        centroid_values = np.asarray(jax.device_get(centroids))
-        for expert_idx in range(self.num_experts):
-            for task_idx in range(self.num_tasks):
-                logs[
-                    f"routing/preference_expert_{expert_idx}_task_{task_idx}"
-                ] = float(centroid_values[expert_idx, task_idx])
+            logs[f"routing/expert_{expert_idx}_fraction"] = float(
+                count / max(1, data.observations.shape[0])
+            )
+        logs["routing/max_assignment_fraction"] = float(
+            self.max_assignment_fraction
+        )
 
         return (
             self.replace(
                 experts=tuple(experts),
                 centroids=centroids,
                 grad_ema=grad_ema,
-                routing_cache_remaining=routing_cache_remaining,
-                cached_expert_batches=cached_expert_batches,
-                cached_assignment_counts=cached_assignment_counts,
-                cached_sample_counts=cached_sample_counts,
+                routing_cache_remaining=0,
+                cached_expert_batches=tuple([None] * self.num_experts),
+                cached_assignment_counts=sample_counts,
+                cached_sample_counts=sample_counts,
             ),
             logs,
         )

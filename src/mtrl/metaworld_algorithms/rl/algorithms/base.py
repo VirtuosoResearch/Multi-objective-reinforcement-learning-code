@@ -586,6 +586,67 @@ class OffPolicyAlgorithm(
 
         start_time = time.time()
 
+        if config.evaluation_frequency > 0:
+            try:
+                from metaworld_algorithms.rl.algorithms.routed_ensemble import (
+                    RoutedEnsembleMTSAC,
+                )
+            except ImportError:
+                RoutedEnsembleMTSAC = None
+
+            if RoutedEnsembleMTSAC is not None and isinstance(
+                self, RoutedEnsembleMTSAC
+            ):
+                if self.eval_task_expert_map is None:
+                    try:
+                        from metaworld.env_dict import ALL_V3_ENVIRONMENTS
+
+                        metaworld_cls_to_task_name = {
+                            v.__name__: k for k, v in ALL_V3_ENVIRONMENTS.items()
+                        }
+                        task_names = [
+                            metaworld_cls_to_task_name[name]
+                            for name in envs.get_attr("task_name")
+                        ]
+                    except Exception:
+                        task_names = envs.get_attr("task_name")
+                    unique_task_names = list(dict.fromkeys(task_names))
+                    per_expert_success = []
+                    for expert in self.experts:
+                        _, _, success_per_task = env_config.evaluate(envs, expert)
+                        per_expert_success.append(success_per_task)
+                    mapping = []
+                    for task_name in unique_task_names:
+                        task_scores = [
+                            success[task_name] for success in per_expert_success
+                        ]
+                        mapping.append(int(np.argmax(task_scores)))
+                    self = self.replace(
+                        eval_task_expert_map=np.asarray(mapping, dtype=np.int64)
+                    )
+
+            print("Starting evaluation at total_steps=0")
+            mean_success_rate, mean_returns, mean_success_per_task = (
+                env_config.evaluate(envs, self)
+            )
+            eval_metrics = {
+                "charts/mean_success_rate": float(mean_success_rate),
+                "charts/mean_evaluation_return": float(mean_returns),
+            } | {
+                f"charts/{task_name}_success_rate": float(success_rate)
+                for task_name, success_rate in mean_success_per_task.items()
+            }
+            print(
+                f"total_steps=0, mean evaluation success rate: {mean_success_rate:.4f}"
+                + f" return: {mean_returns:.4f}"
+            )
+            print("Finished evaluation at total_steps=0")
+
+            if track:
+                log(eval_metrics, step=0)
+
+            obs, _ = envs.reset()
+
         for global_step in range(start_step, config.total_steps // envs.num_envs):
             total_steps = global_step * envs.num_envs
 
@@ -654,6 +715,51 @@ class OffPolicyAlgorithm(
                     and done.any()
                     and global_step > 0
                 ):
+                    try:
+                        from metaworld_algorithms.rl.algorithms.routed_ensemble import (
+                            RoutedEnsembleMTSAC,
+                        )
+                    except ImportError:
+                        RoutedEnsembleMTSAC = None
+
+                    if RoutedEnsembleMTSAC is not None and isinstance(
+                        self, RoutedEnsembleMTSAC
+                    ):
+                        if self.eval_task_expert_map is None:
+                            try:
+                                from metaworld.env_dict import ALL_V3_ENVIRONMENTS
+
+                                metaworld_cls_to_task_name = {
+                                    v.__name__: k
+                                    for k, v in ALL_V3_ENVIRONMENTS.items()
+                                }
+                                task_names = [
+                                    metaworld_cls_to_task_name[name]
+                                    for name in envs.get_attr("task_name")
+                                ]
+                            except Exception:
+                                task_names = envs.get_attr("task_name")
+                            unique_task_names = list(dict.fromkeys(task_names))
+                            per_expert_success = []
+                            for expert in self.experts:
+                                _, _, success_per_task = env_config.evaluate(
+                                    envs, expert
+                                )
+                                per_expert_success.append(success_per_task)
+                            mapping = []
+                            for task_name in unique_task_names:
+                                task_scores = [
+                                    success[task_name]
+                                    for success in per_expert_success
+                                ]
+                                mapping.append(int(np.argmax(task_scores)))
+                            self = self.replace(
+                                eval_task_expert_map=np.asarray(
+                                    mapping, dtype=np.int64
+                                )
+                            )
+
+                    print(f"Starting evaluation at total_steps={total_steps}")
                     mean_success_rate, mean_returns, mean_success_per_task = (
                         env_config.evaluate(envs, self)
                     )
@@ -664,6 +770,7 @@ class OffPolicyAlgorithm(
                         f"charts/{task_name}_success_rate": float(success_rate)
                         for task_name, success_rate in mean_success_per_task.items()
                     }
+                    print(f"Finished evaluation at total_steps={total_steps}")
                     print(
                         f"total_steps={total_steps}, mean evaluation success rate: {mean_success_rate:.4f}"
                         + f" return: {mean_returns:.4f}"

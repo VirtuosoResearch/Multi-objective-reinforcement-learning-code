@@ -29,6 +29,7 @@ from metaworld_algorithms.rl.algorithms import (
     OffPolicyAlgorithm,
     get_algorithm_for_config,
 )
+from metaworld_algorithms.rl.algorithms.routed_ensemble import RoutedEnsembleMTSAC
 from metaworld_algorithms.rl.algorithms.base import (
     MetaLearningAlgorithm,
     OnPolicyAlgorithm,
@@ -80,9 +81,10 @@ class Run:
 
     def enable_wandb(self, **wandb_kwargs) -> None:
         self._wandb_enabled = True
+        force_new_id = bool(wandb_kwargs.pop("force_new_id", False))
 
         latest_ckpt_metadata = self._get_latest_checkpoint_metadata()
-        if latest_ckpt_metadata is not None and self.resume:
+        if latest_ckpt_metadata is not None and self.resume and not force_new_id:
             existing_run_timestamp = latest_ckpt_metadata.get("timestamp")
             if not existing_run_timestamp:
                 print(
@@ -111,6 +113,19 @@ class Run:
         algorithm: Algorithm
         algorithm = algorithm_cls.initialize(self.algorithm, self.env, seed=self.seed)
         is_off_policy = isinstance(algorithm, OffPolicyAlgorithm)
+
+        # if isinstance(algorithm, RoutedEnsembleMTSAC):
+        #     eval_envs = self.env.spawn(seed=self.seed + 1)
+        #     for expert_idx, expert in enumerate(algorithm.experts):
+        #         mean_success_rate, mean_returns, _ = self.env.evaluate(
+        #             eval_envs, expert
+        #         )
+        #         print(
+        #             f"Init expert {expert_idx} mean success rate: {mean_success_rate:.4f}, "
+        #             f"mean return: {mean_returns:.4f}"
+        #         )
+        #     eval_envs.close()
+        #     del eval_envs
 
         buffer_checkpoint = None
         checkpoint_manager = None
