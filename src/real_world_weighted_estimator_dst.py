@@ -33,6 +33,9 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "momdp"))
 
+# Figures are written to a top-level figures/ directory (sibling of src/).
+FIGURES_DIR = os.path.normpath(os.path.join(HERE, os.pardir, "figures"))
+
 import mo_gymnasium as mo_gym                       # noqa: E402
 from weighted_rl import MOMDP_OPE, epsilon_soft_policy   # noqa: E402
 
@@ -165,6 +168,7 @@ def save_plot(K_list, rmse, path, title):
     plt.legend()
     plt.grid(True, which="both", ls=":", alpha=0.5)
     plt.tight_layout()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     plt.savefig(path, dpi=150)
     print(f"\nSaved RMSE plot -> {path}")
 
@@ -216,7 +220,7 @@ def main():
         print(f"{K:<7}" + "".join(f"{rmse[m][ki]:>11.5f}" for m in METHODS))
 
     save_plot(K_list, rmse,
-              os.path.join(HERE, "weighted_estimator_dst_rmse.png"),
+              os.path.join(FIGURES_DIR, "weighted_estimator_dst_rmse.png"),
               title=f"WIS off-policy evaluation on Deep-Sea-Treasure (lambda={pref})")
 
     print("\nTakeaway: on a real MORL benchmark, evaluating a near-greedy target from "

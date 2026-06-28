@@ -13,6 +13,9 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "momdp"))
 
+# Figures are written to a top-level figures/ directory (sibling of src/).
+FIGURES_DIR = os.path.normpath(os.path.join(HERE, os.pardir, "figures"))
+
 from weighted_rl import MOMDP_OPE, uniform_policy, epsilon_soft_policy   # noqa: E402
 from ensemble_momdp import (                                            # noqa: E402
     ConflictMOMDP,
@@ -155,6 +158,7 @@ def save_plot(K_list, rmse, path, title):
     plt.legend()
     plt.grid(True, which="both", ls=":", alpha=0.5)
     plt.tight_layout()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     plt.savefig(path, dpi=150)
     print(f"\nSaved RMSE plot -> {path}")
 
@@ -224,6 +228,7 @@ def save_regret_bar(names, regret, path, title):
     plt.title(title)
     plt.grid(True, axis="y", ls=":", alpha=0.5)
     plt.tight_layout()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     plt.savefig(path, dpi=150)
     print(f"\nSaved regret comparison plot -> {path}")
 
@@ -264,7 +269,7 @@ def main():
     _, regret = learning_weighting_comparison(
         ope, momdp, ensembles, eval_prefs, eps, mode="routed")
     save_regret_bar(list(variants), regret,
-                    os.path.join(HERE, "ensemble_learning_weighting_regret.png"),
+                    os.path.join(FIGURES_DIR, "ensemble_learning_weighting_regret.png"),
                     title="Ensemble learning: weighted-IS vs raw (routed policy)")
 
     # (2) Sanity check: the weighted off-policy estimator still recovers each
