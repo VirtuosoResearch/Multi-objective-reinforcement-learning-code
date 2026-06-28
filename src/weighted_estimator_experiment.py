@@ -1,38 +1,5 @@
 """Routing + ensemble + the weighted estimator, together, in the MOMDP setting.
 
-This experiment ties three pieces together:
-
-  1. Routing & ensemble. A RoutedEnsembleUCBVI (src/momdp/ensemble_momdp.py) is
-     trained on a ConflictMOMDP with clustered preferences: the experts specialize
-     to preference clusters and a learned router (per-expert centroids in
-     preference space) assigns preferences to experts.
-
-  2. Ensemble target policy. For any preference lambda the trained ensemble
-     induces a target policy pi1 of shape (H, S, A):
-       - 'routed'   : the nearest-centroid expert's deployed policy (hard routing);
-       - 'weighted' : a router-responsibility-weighted mixture of expert policies.
-
-  3. Weighted estimator. That ensemble policy is evaluated *off-policy* from data
-     collected under a uniform behavior policy pi0, using the weighted importance
-     sampling estimators -- Eq. (6) trajectory-wise WIS and Eq. (7) step-wise WIS
-     from src/momdp/weighted_rl.py -- and compared against the exact value from
-     MOMDP._get_V_pi. Plain IS (Eq. 4/5) is reported as a baseline.
-
-The single global-optimal policy is included as a reference target to show the
-estimator behaves identically regardless of how the target policy is produced --
-routing/ensemble only changes *which* policy is being evaluated.
-
-Note. In this tabular MOMDP the per-preference optimal policy depends only on the
-shared, known dynamics and reward, so well-trained experts' *exploitation*
-policies coincide (routing then leaves the evaluated value unchanged). We
-therefore evaluate the ensemble's *deployed* policy -- the optimistic UCBVI
-policy it would actually run for a preference (coeff_eval>0) -- for which the
-routed and weighted aggregations are genuinely different policies. The
-estimator's job is to recover their value off-policy; that is what we validate.
-
-Outputs: an RMSE table (target type x estimator), a per-preference value check,
-and an RMSE-vs-dataset-size plot saved next to this script.
-
 Run:  python src/weighted_estimator_experiment.py
 """
 
@@ -72,19 +39,6 @@ def train_routed_ensemble(S, A, H, d, num_experts, num_tasks, conflict,
                           train_K, coeff=0.1, seed=0, is_weighting=None,
                           is_eps=0.1, momdp=None):
     """Train a RoutedEnsembleUCBVI on a ConflictMOMDP with clustered preferences.
-
-    Returns the (conflict) MOMDP and the trained ensemble. share_histogram=False
-    so experts that the router sends to different clusters accumulate different
-    empirical dynamics and hence genuinely different policies.
-
-    ``is_weighting`` controls the importance weighting applied to the experts'
-    learning updates in ``online_game`` (see RoutedEnsembleUCBVI):
-      None  -> raw ensemble: each trajectory updates an expert with weight
-               resp_k only (no off-policy correction);
-      'IS'  -> multiply by rho_{j->k} = prod_h pi_k(a|s)/pi_j(a|s);
-      'WIS' -> the self-normalized (weighted-importance) variant of that ratio.
-    Pass a shared ``momdp`` to train several variants on the *same* environment
-    and training sequence so the only difference is the learning weighting.
     """
     if momdp is None:
         momdp = ConflictMOMDP(S, A, H, d, conflict=conflict, noise_scale=0.05,
