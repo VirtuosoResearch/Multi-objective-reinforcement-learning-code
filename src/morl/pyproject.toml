@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "morl-baselines"
+description = "Routed Q-Pensieve for MO-Gymnasium HalfCheetah, Ant, and Hopper."
+requires-python = ">=3.10"
+license = { text = "MIT License" }
+dependencies = [
+    "mo-gymnasium[mujoco]>=1.3.0",
+    "gymnasium[mujoco]>=1.0.0",
+    "mujoco>=2.3.3",
+    "numpy>=1.21.0",
+    "torch>=1.12.0",
+    "scipy>=1.7.3",
+    "pymoo>=0.6.0",
+    "wandb>=0.14.0",
+    "setuptools>=61.0.0",
+]
+dynamic = ["version"]
+
+[tool.setuptools.packages.find]
+include = ["morl_baselines", "morl_baselines.*", "examples", "examples.*"]
+
+[tool.black]
+line-length = 127
+target-version = ["py310"]
+
